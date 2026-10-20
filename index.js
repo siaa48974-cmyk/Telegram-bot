@@ -11,13 +11,11 @@ const { cmdYt, handleYtCallback } = require('./handlers/yt');
 const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
 const { cmdSong, handleYtmCallback } = require('./handlers/ytm');
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
+// ==== මෙතන වෙනස් කරලා තියෙන්නේ ====
+const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
+if (!BOT_TOKEN) throw new Error('TG_TOKEN not set! Set TG_TOKEN in GitHub Secrets');
 
-/* ================= Local Bot API Server (2GB upload limit) =================
- * BOT_API_SERVER set කරාගෙත් cloud limit (50MB) වෙනුවට local server (2GB) එකෙන්
- * API calls යනවා. නැත්නම් cloud default (api.telegram.org) use වෙනවා.
- */
+/* ================= Local Bot API Server (2GB upload limit) ================= */
 const API_ROOT = process.env.BOT_API_SERVER || 'https://api.telegram.org';
 
 async function registerLocalToken(apiRoot, token) {
@@ -73,7 +71,6 @@ bot.command('mb', (ctx) => cmdMoviebox(ctx));
 /* ================= Text routing ================= */
 bot.on('text', (ctx) => {
   cacheMessage(ctx);
-  const text = ctx.message?.text || '';
   if (isSocialCommand(ctx)) return handleDlCommand(ctx);
   return handleText(ctx);
 });
@@ -86,43 +83,28 @@ bot.on('text', (ctx) => {
 /* ================= Callback routing ================= */
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
-
-  // FIX: bscd_ (subtitle download buttons) bsc_ check එකෙන් match වෙන්නේ නැති නිසා
-  // මුලින්ම දෙකම check කරනවා. නැත්නම් bscd_ callbacks downloader handleCallback එකට
-  // fall-through වෙලා silently drop වෙනවා.
   if (data.startsWith('bscd_') || data.startsWith('bsc_')) {
     return handleSubCallback(ctx);
   }
-
   if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
     return handleYtCallback(ctx);
   }
-
-  // YouTube Music /song callbacks
   if (data.startsWith('ytm_')) return handleYtmCallback(ctx);
-
   if (data.startsWith('ssq_')) return handleSsCallback(ctx);
   if (data.startsWith('ss_')) return handleSsCallback(ctx);
-
   if (data.startsWith('cszq_')) return handleCszCallback(ctx);
   if (data.startsWith('csz_')) return handleCszCallback(ctx);
-
   if (data.startsWith('mbq_')) return handleMbCallback(ctx);
   if (data.startsWith('mb_')) return handleMbCallback(ctx);
-
   if (data.startsWith('vid_') || data.startsWith('aud_')) {
     return handleDlCallback(ctx);
   }
-
   return handleCallback(ctx);
 });
 
-/* ================= Launch (with retry — ETIMEDOUT fix) ================= */
-// Telegram API එකට connection timeout වුණාම crash වෙන්නේ නැතුව
-// 15s පාරක් retry කරලා max 5 පාරක් try කරනවා.
+/* ================= Launch (with retry) ================= */
 const MAX_RETRIES = 5;
 const RETRY_DELAY = 15000;
-
 let launched = false;
 async function launchWithRetry(attempt = 1) {
   if (launched) return;
