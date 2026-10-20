@@ -16,22 +16,18 @@ jobs:
         with:
           node-version: '20'
 
-      # ---- Deno (alive/other handlers use කරොත්) ----
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
-      # ---- yt-dlp + version check (downloader handler වලට) ----
       - name: Install yt-dlp
         run: |
           sudo pip3 install --upgrade yt-dlp || pip3 install --upgrade yt-dlp
           yt-dlp --version
 
-      # ---- ffmpeg (MP4 convert step වලට අනිවාර්යයි) ----
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      # ---- Chromium system libs (puppeteer headless browser වලට) ----
       - name: Install chromium dependencies
         run: |
           sudo apt-get update
@@ -41,22 +37,18 @@ jobs:
             libxdamage1 libxrandr2 libcups2 libpango-1.0-0 \
             libcairo2 libxshmfence1 || true
 
-      # ---- npm deps (puppeteer chromium download එක default enable) ----
       - name: Install npm dependencies
         run: npm install
 
-      # ---- Local Bot API server (2GB uploads වලට) — optional ----
-      # TELEGRAM_API_ID / TELEGRAM_API_HASH secrets set කරාගෙත් enable වෙනවා
       - name: Setup local bot API server
         if: ${{ vars.LOCAL_BOT_API == 'true' }}
         run: echo "LOCAL_BOT_API_SERVER=true" >> $GITHUB_ENV
 
-      # ---- Run bot ----
+      # ---- මෙතන තමයි fix එක ----
       - name: Run bot
         run: node index.js
         env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          # 2GB uploads වලට local bot api server — repo vars වල LOCAL_BOT_API=true දාලා,
-          # BOT_API_SERVER secret එකක් (http://localhost:8081) set කරාගෙත්
           BOT_API_SERVER: ${{ secrets.BOT_API_SERVER }}
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
