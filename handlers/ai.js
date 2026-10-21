@@ -1,9 +1,17 @@
-// handlers/ai.js — Llama 3 (Groq) Chat + AI Image Generation
+// handlers/ai.js — Llama 3 (Groq) Chat + AI Image Generation (fixed: model fallback)
 const axios = require('axios');
 
 const GROQ_KEY = process.env.GROQ_API_KEY;
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const MODEL = 'llama-3.3-70b-versatile';
+
+// ==== Free tier models (fallback order) ====
+const MODELS = [
+  'llama-3.1-8b-instant',        // free tier ✅ fast
+  'openai/gpt-oss-20b',          // free tier ✅
+  'meta-llama/llama-4-scout-17b-16e-instruct', // free tier (Meta Llama 4)
+  'llama-3.3-70b-versatile'      // enterprise only — last try
+];
+let activeModel = null;
 
 // ==== Chat memory (per chat) ====
 const memory = new Map();
@@ -16,19 +24,40 @@ const SYSTEM_PROMPT = 'You are a helpful, friendly AI assistant. Reply in the sa
 
 async function groqChat(messages) {
   if (!GROQ_KEY) throw new Error('GROQ_API_KEY not set in Secrets');
-  const { data } = await axios.post(GROQ_URL, {
-    model: MODEL,
-    messages,
-    temperature: 0.7,
-    max_tokens: 1024
-  }, {
-    headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-    timeout: 60000
-  });
-  return data.choices[0].message.content;
+
+  const models = activeModel ? [activeModel, ...MODELS.filter(m => m !== activeModel)] : MODELS;
+  let lastErr;
+
+  for (const model of models) {
+    try {
+      const { data } = await axios.post(GROQ_URL, {
+        model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 1024
+      }, {
+        headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+        timeout: 60000
+      });
+      activeModel = model;   // වැඩ කරන model එක remember කරගන්නවා
+      console.log(`✅ AI model in use: ${model}`);
+      return data.choices[0].message.content;
+    } catch (e) {
+      lastErr = e;
+      const errMsg = e.response?.data?.error?.message || e.message;
+      console.warn(`⚠️ Model ${model} failed: ${errMsg}`);
+      // model එකට access නැත්නම් ඊළඟ model එකට try කරනවා
+      if (errMsg.includes('does not exist') || errMsg.includes('access') || errMsg.includes('decommissioned') || e.response?.status === 404 || e.response?.status === 403) {
+        continue;
+      }
+      // rate limit / වෙනත් error එකක් නම් throw කරනවා
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
-/* ============ /ai — Chat with Llama 3 ============ */
+/* ============ /ai — Chat ============ */
 async function cmdAi(ctx) {
   const prompt = ctx.message.text.split(' ').slice(1).join(' ').trim();
   if (!prompt) return ctx.reply('❗ භාවිතය: /ai <ඔයාගේ ප්‍රශ්නය>');
@@ -38,7 +67,6 @@ async function cmdAi(ctx) {
     const history = getHistory(ctx.chat.id);
     if (history.length === 0) history.push({ role: 'system', content: SYSTEM_PROMPT });
     history.push({ role: 'user', content: prompt });
-    // memory limit: keep system + last 12 messages
     while (history.length > 13) history.splice(1, 1);
 
     const reply = await groqChat(history);
@@ -56,7 +84,7 @@ async function cmdAi(ctx) {
 /* ============ /reset — clear chat memory ============ */
 async function cmdReset(ctx) {
   memory.delete(ctx.chat.id);
-  ctx.reply('🔄 Chat memory reset ✅ අලුතෙන් කතා කරන්න පුළුවන්!');
+  ctx.reply('🔄 Chat memory reset ✅');
 }
 
 /* ============ /img — AI image generation (Pollinations, free) ============ */
