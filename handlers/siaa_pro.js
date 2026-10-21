@@ -1,106 +1,130 @@
-const axios = require('axios');
 const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+const { Markup } = require('telegraf');
 
-async function searchWeb(query) {
-  try {
-    const r = await axios.get(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json`, { timeout: 6000 });
-    if (r.data.AbstractText) return r.data.AbstractText;
-  } catch {}
-  return '';
-}
+// --- CONFIG ---
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const MODEL = "llama-3.1-8b-instant"; // fast + funny
 
-// Funny System Prompt
-const FUNNY_SYSTEM = `
-You are SiAA Pro, created by SiAA.
-PERSONALITY:
-- You are super funny, roast lightly, friendly, savage but cute.
-- Talk like a Sri Lankan Gen-Z friend. Use Sinhala + English mix.
-- Use emojis a lot 😂🔥😎.
-- You are SiAA Pro, not ChatGPT.
-
-RULES FOR ANSWER:
-1. Answer clean, step by step with headings.
-2. If user sends code question, ALWAYS reply in beautiful copy box like:
-\`\`\`language
-code here
-\`\`\`
-3. If user asks about a photo, describe funny but accurately.
-4. Keep answers short, clean, not too long.
-5. Be funny!
-`;
-
-async function getAIReply(prompt, webData) {
-  let system = FUNNY_SYSTEM;
-  if (webData) system += `\nLIVE DATA: ${webData}`;
-  
-  const url = `https://text.pollinations.ai/${encodeURIComponent(prompt)}?model=openai&system=${encodeURIComponent(system)}`;
-  const { data } = await axios.get(url, { timeout: 90000 });
-  return typeof data === 'string' ? data : JSON.stringify(data);
-}
-
-// Text to Female Voice
+// Voice Reply Function (Free TTS)
 async function sendVoiceReply(ctx, text) {
   try {
-    // Female voice using pollinations audio
-    const cleanText = text.slice(0, 500); // voice එකට කෙටියෙන්
-    const ttsUrl = `https://text.pollinations.ai/${encodeURIComponent(cleanText)}?model=openai-audio&voice=nova`;
-    const audioRes = await axios.get(ttsUrl, { responseType: 'arraybuffer', timeout: 20000 });
+    // Clean text for TTS (emojis අයින් කරනවා)
+    const cleanText = text.replace(/[*_~`]/g, '').slice(0, 250);
+    if (!cleanText) return false;
+
+    const ttsUrl = `https://api.streamelements.com/kappa/v2/speech?voice=Brian&text=${encodeURIComponent(cleanText)}`;
     
-    const filePath = `/tmp/pro_${Date.now()}.mp3`;
-    fs.writeFileSync(filePath, audioRes.data);
-    
-    await ctx.replyWithVoice({ source: filePath });
-    fs.unlinkSync(filePath);
+    const response = await axios({
+      method: 'GET',
+      url: ttsUrl,
+      responseType: 'arraybuffer'
+    });
+
+    const voicePath = path.join(__dirname, `../temp_${ctx.from.id}.mp3`);
+    fs.writeFileSync(voicePath, response.data);
+
+    await ctx.replyWithVoice({ source: voicePath }, {
+      caption: `🎙️ SiAA Pro: ${text.slice(0, 100)}`
+    });
+
+    if (fs.existsSync(voicePath)) fs.unlinkSync(voicePath);
+    return true;
   } catch (e) {
-    console.log('Voice Error:', e.message);
+    console.log('TTS Error:', e.message);
+    return false;
   }
+}
+
+// Download voice file from Telegram
+async function getVoiceText(ctx) {
+  try {
+    if (!ctx.message.voice) return null;
+    const fileId = ctx.message.voice.file_id;
+    const link = await ctx.telegram.getFileLink(fileId);
+    return "User sent a voice message [Voice Input]";
+  } catch { return null; }
 }
 
 async function cmdPro(ctx) {
-  let q = '';
-  let hasPhoto = false;
-
-  // Photo එකක් එක්කද?
-  if (ctx.message.photo) {
-    hasPhoto = true;
-    q = ctx.message.caption ? ctx.message.caption.replace('/pro','').replace('/siaapro','').trim() : 'මේ photo එකේ මොකද්ද තියෙන්නේ? funny විදිහට කියන්න';
-    if (!q) q = 'මේ photo එකේ මොකද්ද තියෙන්නේ?';
-    q = `User sent a photo. User question: ${q}. Describe the photo funny way if you can.`;
-  } else if (ctx.message.voice || ctx.message.audio) {
-    // Voice Message එකක්
-    await ctx.reply('🎧 SiAA Pro අහගෙන ඉන්නවා...');
-    q = 'User sent a voice message. They said hello and asked something. Reply funny and say you heard their voice.';
-  } else {
-    q = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  }
-
-  if (!q) return ctx.reply('⚡ *SiAA Pro* 😎\n\nභාවිතය:\n`/pro oyage prashnaya`\nPhoto එකක් එක්ක `/pro meka mokakda?`\nVoice එකක් එවන්න 🎤', { parse_mode: 'Markdown' });
-
-  const thinking = await ctx.reply('⚡ SiAA Pro 😂 හිතනවා...');
-
   try {
-    const web = await searchWeb(q);
-    const replyText = await getAIReply(q, web);
+    const msg = ctx.message.text || ctx.message.caption || "";
+    let prompt = msg.replace(/^\/(pro|siaapro)\s*/i, '').trim();
+    let imageUrl = null;
 
-    // Clean Format
-    let finalText = `⚡ *SiAA Pro* 😎🔥\n\n${replyText}`;
-    if (web) finalText += `\n\n🌐 _Live Internet_`;
+    // 1. Photo Handle
+    if (ctx.message.photo) {
+      const photo = ctx.message.photo[ctx.message.photo.length - 1];
+      const link = await ctx.telegram.getFileLink(photo.file_id);
+      imageUrl = link.href;
+      if (!prompt) prompt = "Describe this photo in a funny way";
+    }
 
-    await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, finalText.slice(0, 4000), { parse_mode: 'Markdown' });
+    // 2. Voice Handle
+    let isVoiceRequest = false;
+    if (ctx.message.voice) {
+      isVoiceRequest = true;
+      const voiceNote = await getVoiceText(ctx);
+      if (!prompt) prompt = "I sent a voice message, reply funny";
+    }
 
-    // Female Voice එකත් එවනවා (Text එකෙන් කෙටි කොටසක්)
-    if (ctx.message.voice || q.toLowerCase().includes('voice')) {
-      await sendVoiceReply(ctx, replyText);
-    } else if (Math.random() > 0.5) { // සමහර වෙලාවට auto voice දානවා
-      // නිකන් voice ඕන නම් /pro voice කියලා type කරන්න කියලා ඉල්ලුවොත් විතරක් voice දාමු
-      if (q.toLowerCase().includes('voice eka') || q.toLowerCase().includes('voice')) {
-        await sendVoiceReply(ctx, replyText);
+    if (!prompt) {
+      return ctx.reply("😎 මචං /pro <msg> කියලා යමක් දාන්න, නැත්තම් Photo/Voice එකක් එවන්න! Eg: /pro මට බඩගිනියි");
+    }
+
+    // 3. AI Call
+    await ctx.sendChatAction('typing');
+
+    const systemPrompt = `You are SiAA Pro, a funny, savage, friendly Sri Lankan bot. 
+    - Talk in mixed Sinhala + English (Singlish), very funny, casual like "machan".
+    - Make jokes, be savage but friendly.
+    - Keep reply short under 150 words.
+    - Use emojis 😂🔥😎
+    - If photo described, roast it funny way.
+    - User language is Sinhala mostly.`;
+
+    let aiReply = "";
+
+    if (!GROQ_API_KEY) {
+      aiReply = `😂 මචං "${prompt}" කියලා කිව්වට GROQ_API_KEY එක නෑ! .env එකේ දාන්න.`;
+    } else {
+      const payload = {
+        model: MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.9,
+        max_tokens: 300
+      };
+
+      const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+        headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
+      });
+
+      aiReply = res.data.choices[0]?.message?.content || "මචං Error එකක් ආවා 😅";
+    }
+
+    // 4. Send Reply - Voice + Text
+    if (isVoiceRequest) {
+      // Voice එකක් එවපු අයට Voice එකකින්ම Reply
+      await ctx.sendChatAction('record_voice');
+      const voiceSent = await sendVoiceReply(ctx, aiReply);
+      if (!voiceSent) {
+        await ctx.reply(aiReply, { parse_mode: 'Markdown' });
       }
+    } else {
+      // Normal Text Reply + Try Voice also?
+      await ctx.reply(aiReply, { parse_mode: 'Markdown' });
+      
+      // Text එකටත් Voice එකක් එක්කම ඕන නම් මේ line එක uncomment කරන්න
+      // await sendVoiceReply(ctx, aiReply);
     }
 
   } catch (e) {
-    console.error(e);
-    await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, '😵 SiAA Pro ට පොඩි error එකක්, ආයේ try කරන්න මචං!');
+    console.error('SiAA Pro Error:', e.message);
+    await ctx.reply(`😵 Error මචං: ${e.message}`);
   }
 }
 
