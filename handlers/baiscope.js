@@ -1,8 +1,8 @@
-// handlers/baiscope.js — v9.0 (FlareSolverr edition)
+// handlers/baiscope.js — v9.1 (FlareSolverr + strict download-link matching)
 // Baiscope Sinhala subtitle handler with Cloudflare bypass
 // Node.js >= 18
 // Dependencies: axios, cheerio
-// Requires: FlareSolverr running (see below for docker command)
+// Requires: FlareSolverr running (docker service in workflow)
 
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -20,6 +20,7 @@ const FLARESOLVERR = process.env.FLARESOLVERR_URL || '';
 let flareSession = null;        // FlareSolverr session id
 let flareCookies = null;        // { name, value, domain }[] — cf_clearance etc.
 let flareCookieFetchedAt = 0;
+let flareLastUserAgent = null;  // cf_clearance UA-bound නිසා store කරනවා
 const COOKIE_TTL = 8 * 60 * 1000; // cf_clearance ~15min විතරයි; 8 min වලින් refresh
 
 const HEADERS = {
@@ -64,14 +65,33 @@ function remember(id, value) {
   timer.unref?.();
 }
 
+/* ================= Download link matching (STRICT) =================
+   baiscope.lk එකේ ඇත්ත download link pattern:
+   https://www.baiscope.lk/download/<post-slug>/<numeric-id>
+   නැත්නම් dl.baiscope.lk එකේම file link.
+   nav/category/footer links (/category/..., /?cat=...) කවදත් match වෙන්නේ නෑ! */
+
+function isRealSubtitleDownloadUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!['www.baiscope.lk', 'baiscope.lk', 'dl.baiscope.lk'].includes(u.hostname)) return false;
+
+    if (u.hostname === 'dl.baiscope.lk') return true;
+
+    // /download/<slug>/<numeric-id>
+    if (/^\/download\/[^/]+\/\d+\/?$/i.test(u.pathname)) return true;
+
+    // අනිත් direct file links (කලාතුරකින්)
+    if (/\.(zip|rar|7z|srt|sub)$/i.test(u.pathname)) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function isLikelyDownloadUrl(url) {
-  const lower = String(url || '').toLowerCase();
-  return (
-    lower.includes('dl.baiscope.lk') ||
-    lower.includes('/download') ||
-    /\.(zip|rar|7z|srt|sub)(\?|$)/.test(lower) ||
-    lower.includes('sub')
-  );
+  return isRealSubtitleDownloadUrl(url);
 }
 
 function decodeFilename(disposition, fallbackUrl) {
@@ -100,7 +120,6 @@ function getFileExtension(name, contentType, data) {
   if (type.includes('rar')) return '.rar';
   if (type.includes('x-subrip') || type.includes('srt')) return '.srt';
   if (type.includes('plain') && data.length > 0) {
-    // SRT files: first bytes contain " --> " pattern usually
     const head = data.slice(0, 2000).toString('utf8');
     if (head.includes('-->')) return '.srt';
     return '.srt';
@@ -115,42 +134,74 @@ function getFileExtension(name, contentType, data) {
 
 /* ================= FlareSolverr layer ================= */
 
-async function flareRequest(url, { method = 'request.get', postData = null, returnRaw = false } = {}) {
+async function _flareRaw(url, { cmd = 'request.get', postData = null } = {}) {
   if (!FLARESOLVERR) throw new Error('FLARESOLVERR_URL not configured');
 
   // Reuse session; create if missing
   if (!flareSession) {
-    const res = await axios.post(`${FLARESOLVERR}/v1`, {
-      cmd: 'sessions.create',
-    }, { timeout: 60000 });
-    flareSession = res.data?.session || null;
-    console.log('[flare] session created:', flareSession);
+    try {
+      const res = await axios.post(`${FLARESOLVERR}/v1`, { cmd: 'sessions.create' }, { timeout: 60000 });
+      flareSession = res.data?.session || null;
+      console.log('[flare] session created:', flareSession);
+    } catch (e) {
+      console.error('[flare] session create failed:', e.message);
+      flareSession = null; // sessionless mode එකට
+    }
   }
 
   const body = {
-    cmd: method,
+    cmd,
     url,
     maxTimeout: 60000,
     session: flareSession || undefined,
   };
-  if (postData) {
-    body.cmd = 'request.post';
-    body.postData = postData;
-  }
+  if (postData) body.postData = postData;
 
   const res = await axios.post(`${FLARESOLVERR}/v1`, body, { timeout: 90000 });
 
   const sol = res.data?.solution;
   if (!sol) throw new Error(`FLARE_ERROR: ${res.data?.message || 'no solution'}`);
 
-  // Refresh cookie cache
+  // Refresh cookie + UA cache
   if (Array.isArray(sol.cookies) && sol.cookies.length) {
     flareCookies = sol.cookies;
     flareCookieFetchedAt = Date.now();
   }
+  if (sol.userAgent) flareLastUserAgent = sol.userAgent;
 
-  if (returnRaw) return sol; // full solution (headers, cookies, etc.)
-  return sol.response?.data ?? sol.response ?? '';
+  return sol;
+}
+
+// HTML page එකක් ගන්නවා — FlareSolverr තියෙනවා නම් ඒකෙන්, fail වුණොත් direct fallback
+async function fetchPage(url) {
+  if (FLARESOLVERR) {
+    try {
+      const sol = await _flareRaw(url);
+      const data = sol.response?.data ?? sol.response ?? '';
+      if (typeof data === 'string' && data.length > 0) return data;
+      throw new Error('FLARE_EMPTY_RESPONSE');
+    } catch (e) {
+      console.error('[baiscope] flare failed, trying direct:', e.message);
+    }
+  }
+
+  const { data, status } = await axios.get(url, {
+    headers: {
+      ...HEADERS,
+      ...(flareCookieHeader(url) ? { Cookie: flareCookieHeader(url) } : {}),
+      ...(flareLastUserAgent ? { 'User-Agent': flareLastUserAgent } : {}),
+    },
+    timeout: 30000,
+    responseType: 'text',
+    validateStatus: s => s < 500,
+  });
+  if (status === 403) throw new Error('SITE_BLOCKED_403');
+  if (status === 429) throw new Error('SITE_BLOCKED_429');
+  if (status === 503) throw new Error('SITE_BLOCKED_503');
+  if (typeof data === 'string' && /Just a moment\.\.\.|cf-challenge|Checking your browser/i.test(data)) {
+    throw new Error('SITE_BLOCKED_403');
+  }
+  return data;
 }
 
 function flareCookieHeader(targetUrl) {
@@ -166,31 +217,7 @@ function flareCookieHeader(targetUrl) {
   }
 }
 
-/* ================= HTTP fetchers ================= */
-
-// HTML page එකක් ගන්නවා — FlareSolverr තියෙනවා නම් ඒකෙන්, නැත්නම් direct
-async function fetchPage(url) {
-  if (FLARESOLVERR) {
-    try {
-      return await flareRequest(url);
-    } catch (e) {
-      console.error('[baiscope] flare failed, trying direct:', e.message);
-    }
-  }
-  const { data } = await axios.get(url, {
-    headers: HEADERS,
-    timeout: 30000,
-    responseType: 'text',
-    validateStatus: s => s < 500,
-  });
-  if (typeof data === 'string' && /Just a moment\.\.\.|cf-challenge|Checking your browser/i.test(data)) {
-    throw new Error('SITE_BLOCKED_403');
-  }
-  if (data && data.status === 403) throw new Error('SITE_BLOCKED_403');
-  if (data && data.status === 429) throw new Error('SITE_BLOCKED_429');
-  if (data && data.status === 503) throw new Error('SITE_BLOCKED_503');
-  return data;
-}
+/* ================= File download ================= */
 
 // Binary/file download — FlareSolverr binary pass කරන්නේ නෑ,
 // නමුත් එයා දෙන cookies (cf_clearance) + UA එක direct axios එකට දාලා download කරන්න පුළුවන්
@@ -200,13 +227,10 @@ async function fetchSubtitle(url, referer, depth = 0, seen = new Set()) {
   seen.add(url);
 
   const headers = { ...HEADERS, Referer: referer || `${BASE}/` };
+  // cf_clearance UA-bound නිසා flare UA එකම යා යුතුයි
+  if (flareLastUserAgent) headers['User-Agent'] = flareLastUserAgent;
   const cookie = flareCookieHeader(url);
   if (cookie) headers.Cookie = cookie;
-
-  // FlareSolverr session UA එක use කරන්න — cookie UA match වෙන්න ඕනි (cf_clearance is UA-bound!)
-  if (FLARESOLVERR && flareLastUserAgent) {
-    headers['User-Agent'] = flareLastUserAgent;
-  }
 
   const response = await axios.get(url, {
     headers,
@@ -231,24 +255,25 @@ async function fetchSubtitle(url, referer, depth = 0, seen = new Set()) {
     if (/Just a moment\.\.\.|cf-challenge/i.test(html)) throw new Error('SITE_BLOCKED_403');
 
     const $ = cheerio.load(html);
-    // meta refresh / JS redirect හොයනවා
+    // meta refresh / direct download link හොයනවා — STRICT matcher එකෙන් විතරයි
     let next = null;
     const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
     if (metaRefresh) {
       const m = /url=(.+)/i.exec(metaRefresh);
-      if (m) next = absoluteUrl(m[1], url);
+      if (m) {
+        const candidate = absoluteUrl(m[1], url);
+        if (candidate && isRealSubtitleDownloadUrl(candidate)) next = candidate;
+      }
     }
     if (!next) {
-      $('a').each((_, el) => {
+      $('a[href]').each((_, el) => {
         if (next) return;
-        const href = $(el).attr('href') || '';
-        const text = ($(el).text() || '').toLowerCase();
-        if ((isLikelyDownloadUrl(href) || text.includes('download')) && href.startsWith('http')) {
-          next = absoluteUrl(href, url);
-        }
+        const abs = absoluteUrl($(el).attr('href') || '', url);
+        if (abs && isRealSubtitleDownloadUrl(abs)) next = abs;
       });
     }
     if (!next) throw new Error('INTERMEDIATE_PAGE');
+    console.log('[baiscope] intermediate page → redirect to:', next);
     return fetchSubtitle(next, url, depth + 1, seen);
   }
 
@@ -270,15 +295,6 @@ async function fetchSubtitle(url, referer, depth = 0, seen = new Set()) {
   }
 }
 
-// FlareSolverr UA එක store කරන්න (cf_clearance UA-bound නිසා)
-let flareLastUserAgent = null;
-const _origFlareRequest = flareRequest;
-flareRequest = async function (url, opts) {
-  const sol = await _origFlareRequest(url, opts);
-  if (sol?.userAgent) flareLastUserAgent = sol.userAgent;
-  return sol;
-};
-
 async function downloadSubtitle(url, referer) {
   return fetchSubtitle(url, referer, 0, new Set());
 }
@@ -291,25 +307,28 @@ async function searchBaiscope(query) {
   const $ = cheerio.load(html);
   const results = [];
 
-  // WordPress search results — article/h2/a pattern
+  // Search result cards — link එක post page එකට යනවා:
+  // https://www.baiscope.lk/movies/<slug>
   $('article, .post, .item').each((_, el) => {
     const linkEl = $(el).find('a[href]').first();
     const href = linkEl.attr('href');
     const title =
       $(el).find('h2, .entry-title, .post-title').first().text().trim() ||
       linkEl.text().trim();
-    if (href && title && absoluteUrl(href, BASE)) {
-      results.push({ title, url: absoluteUrl(href, BASE) });
+    const abs = absoluteUrl(href, BASE);
+    if (abs && title && abs.includes('baiscope.lk/movies')) {
+      results.push({ title, url: abs });
     }
   });
 
-  // Fallback: plain h2 > a links
+  // Fallback: plain heading links
   if (!results.length) {
     $('h2 a, h3 a, .entry-title a').each((_, el) => {
       const href = $(el).attr('href');
       const title = $(el).text().trim();
-      if (href && title && !href.includes('#')) {
-        results.push({ title, url: absoluteUrl(href, BASE) });
+      const abs = absoluteUrl(href, BASE);
+      if (abs && title && abs.includes('baiscope.lk/movies')) {
+        results.push({ title, url: abs });
       }
     });
   }
@@ -318,7 +337,7 @@ async function searchBaiscope(query) {
   const seen = new Set();
   return results
     .filter(r => {
-      if (seen.has(r.url) || !r.url.includes('baiscope')) return false;
+      if (seen.has(r.url)) return false;
       seen.add(r.url);
       return true;
     })
@@ -341,14 +360,16 @@ async function getSubtitleLink(pageUrl) {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
-    const text = ($(el).text() || '').toLowerCase();
     const abs = absoluteUrl(href, pageUrl);
     if (!abs || seen.has(abs)) return;
 
-    if (isLikelyDownloadUrl(abs) || text.includes('download') || text.includes('බාගන්න')) {
-      seen.add(abs);
-      links.push({ label: $(el).text().trim() || 'Download Subtitle', url: abs });
-    }
+    // STRICT: ඇත්ත subtitle download links (/download/<slug>/<id>) විතරක් ගන්නවා.
+    // nav / category / footer links skip! (v9.1 fix)
+    if (!isRealSubtitleDownloadUrl(abs)) return;
+
+    seen.add(abs);
+    const label = ($(el).text() || '').trim() || 'Download Subtitle';
+    links.push({ label, url: abs });
   });
 
   return { title, poster, links };
