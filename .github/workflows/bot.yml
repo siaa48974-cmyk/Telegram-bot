@@ -44,7 +44,6 @@ jobs:
         if: ${{ vars.LOCAL_BOT_API == 'true' }}
         run: echo "LOCAL_BOT_API_SERVER=true" >> $GITHUB_ENV
 
-      # ---- මෙතන තමයි fix එක ----
       - name: Run bot
         run: node index.js
         env:
@@ -52,3 +51,4 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           BOT_API_SERVER: ${{ secrets.BOT_API_SERVER }}
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
