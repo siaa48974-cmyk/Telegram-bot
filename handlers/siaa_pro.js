@@ -1,130 +1,91 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { Markup } = require('telegraf');
 
-// --- CONFIG ---
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const MODEL = "llama-3.1-8b-instant"; // fast + funny
+// Stable Models - 404 එන්නේ නෑ
+const MODELS = ["llama3-8b-8192", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 
-// Voice Reply Function (Free TTS)
 async function sendVoiceReply(ctx, text) {
   try {
-    // Clean text for TTS (emojis අයින් කරනවා)
-    const cleanText = text.replace(/[*_~`]/g, '').slice(0, 250);
+    const cleanText = text.replace(/[*_~`]/g, '').slice(0, 200);
     if (!cleanText) return false;
-
-    const ttsUrl = `https://api.streamelements.com/kappa/v2/speech?voice=Brian&text=${encodeURIComponent(cleanText)}`;
-    
-    const response = await axios({
-      method: 'GET',
-      url: ttsUrl,
-      responseType: 'arraybuffer'
-    });
-
-    const voicePath = path.join(__dirname, `../temp_${ctx.from.id}.mp3`);
-    fs.writeFileSync(voicePath, response.data);
-
-    await ctx.replyWithVoice({ source: voicePath }, {
-      caption: `🎙️ SiAA Pro: ${text.slice(0, 100)}`
-    });
-
-    if (fs.existsSync(voicePath)) fs.unlinkSync(voicePath);
+    // Working TTS
+    const url = `https://api.streamelements.com/kappa/v2/speech?voice=Brian&text=${encodeURIComponent(cleanText)}`;
+    const res = await axios({ method: 'GET', url, responseType: 'arraybuffer', timeout: 15000 });
+    const p = path.join(__dirname, `../temp_${Date.now()}.mp3`);
+    fs.writeFileSync(p, res.data);
+    await ctx.replyWithVoice({ source: p });
+    if (fs.existsSync(p)) fs.unlinkSync(p);
     return true;
   } catch (e) {
-    console.log('TTS Error:', e.message);
-    return false;
+    console.log('Voice TTS Failed:', e.message);
+    return false; // Voice බැරි නම් Error දෙන්නේ නෑ, false වෙනවා
   }
-}
-
-// Download voice file from Telegram
-async function getVoiceText(ctx) {
-  try {
-    if (!ctx.message.voice) return null;
-    const fileId = ctx.message.voice.file_id;
-    const link = await ctx.telegram.getFileLink(fileId);
-    return "User sent a voice message [Voice Input]";
-  } catch { return null; }
 }
 
 async function cmdPro(ctx) {
   try {
-    const msg = ctx.message.text || ctx.message.caption || "";
-    let prompt = msg.replace(/^\/(pro|siaapro)\s*/i, '').trim();
-    let imageUrl = null;
+    const raw = ctx.message.text || ctx.message.caption || "";
+    let prompt = raw.replace(/^\/(pro|siaapro)\s*/i, '').trim();
+    let isVoice = !!ctx.message.voice;
 
-    // 1. Photo Handle
     if (ctx.message.photo) {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
       const link = await ctx.telegram.getFileLink(photo.file_id);
-      imageUrl = link.href;
-      if (!prompt) prompt = "Describe this photo in a funny way";
+      if (!prompt) prompt = "Roast this image funny";
     }
 
-    // 2. Voice Handle
-    let isVoiceRequest = false;
-    if (ctx.message.voice) {
-      isVoiceRequest = true;
-      const voiceNote = await getVoiceText(ctx);
-      if (!prompt) prompt = "I sent a voice message, reply funny";
-    }
+    if (!prompt && isVoice) prompt = "User sent a voice, reply funny in Singlish";
+    if (!prompt) return ctx.reply("😎 /pro <msg> දාන්න මචං! Eg: /pro hi machan");
 
-    if (!prompt) {
-      return ctx.reply("😎 මචං /pro <msg> කියලා යමක් දාන්න, නැත්තම් Photo/Voice එකක් එවන්න! Eg: /pro මට බඩගිනියි");
-    }
+    if (!GROQ_API_KEY) return ctx.reply("⚠️ GROQ_API_KEY නෑ .env එකේ! Groq.com එකෙන් free key එකක් අරන් දාන්න.");
 
-    // 3. AI Call
     await ctx.sendChatAction('typing');
 
-    const systemPrompt = `You are SiAA Pro, a funny, savage, friendly Sri Lankan bot. 
-    - Talk in mixed Sinhala + English (Singlish), very funny, casual like "machan".
-    - Make jokes, be savage but friendly.
-    - Keep reply short under 150 words.
-    - Use emojis 😂🔥😎
-    - If photo described, roast it funny way.
-    - User language is Sinhala mostly.`;
+    const systemPrompt = `You are SiAA Pro, funny Sri Lankan AI. Talk in Sinhala + English mix (Singlish), very funny, savage but friendly, use emojis 😂🔥. Keep reply under 120 words.`;
 
-    let aiReply = "";
+    let aiReply = null;
+    let lastError = null;
 
-    if (!GROQ_API_KEY) {
-      aiReply = `😂 මචං "${prompt}" කියලා කිව්වට GROQ_API_KEY එක නෑ! .env එකේ දාන්න.`;
-    } else {
-      const payload = {
-        model: MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.9,
-        max_tokens: 300
-      };
-
-      const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
-        headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
-      });
-
-      aiReply = res.data.choices[0]?.message?.content || "මචං Error එකක් ආවා 😅";
+    // Try models one by one - 404 ආවොත් next model එක try කරනවා
+    for (const model of MODELS) {
+      try {
+        const res = await axios.post('https://api.groq.com/openai/v1/chat/completions',
+          {
+            model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
+            temperature: 0.9,
+            max_tokens: 300
+          },
+          { headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 20000 }
+        );
+        aiReply = res.data.choices[0]?.message?.content;
+        if (aiReply) break;
+      } catch (e) {
+        lastError = e.response?.data?.error?.message || e.message;
+        console.log(`Model ${model} failed: ${lastError}`);
+        continue;
+      }
     }
 
-    // 4. Send Reply - Voice + Text
-    if (isVoiceRequest) {
-      // Voice එකක් එවපු අයට Voice එකකින්ම Reply
+    if (!aiReply) {
+      return ctx.reply(`😵 AI Error: ${lastError}\n\nCheck GROQ_API_KEY valid da kiyala.`);
+    }
+
+    // Voice නම් Voice + Text, Text නම් Text විතරක්
+    if (isVoice) {
       await ctx.sendChatAction('record_voice');
-      const voiceSent = await sendVoiceReply(ctx, aiReply);
-      if (!voiceSent) {
-        await ctx.reply(aiReply, { parse_mode: 'Markdown' });
-      }
+      const ok = await sendVoiceReply(ctx, aiReply);
+      if (!ok) await ctx.reply(aiReply);
+      else await ctx.reply(`📝 ${aiReply}`);
     } else {
-      // Normal Text Reply + Try Voice also?
-      await ctx.reply(aiReply, { parse_mode: 'Markdown' });
-      
-      // Text එකටත් Voice එකක් එක්කම ඕන නම් මේ line එක uncomment කරන්න
-      // await sendVoiceReply(ctx, aiReply);
+      await ctx.reply(aiReply);
     }
 
   } catch (e) {
-    console.error('SiAA Pro Error:', e.message);
-    await ctx.reply(`😵 Error මචං: ${e.message}`);
+    console.error('SiAA Pro Crash:', e);
+    await ctx.reply(`😵 Error: ${e.message}`);
   }
 }
 
