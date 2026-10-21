@@ -11,13 +11,20 @@ const { cmdYt, handleYtCallback } = require('./handlers/yt');
 const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
 const { cmdSong, handleYtmCallback } = require('./handlers/ytm');
 const { cmdAi, cmdImg, cmdReset } = require('./handlers/ai');
-const { cmdAiz } = require('./handlers/ai2'); // <-- අලුතෙන් add කරා
 
-// ==== මෙතන වෙනස් කරලා තියෙන්නේ ====
+// AI2 Safe Load - file එක නැතත් bot එක crash වෙන්නෙ නෑ
+let cmdAi2 = null;
+try {
+  const ai2Module = require('./handlers/ai2');
+  cmdAi2 = ai2Module.cmdAi2;
+  console.log('✅ ai2.js loaded');
+} catch (e) {
+  console.log('⚠️ ai2.js not found, /ai2 disabled - ' + e.message);
+}
+
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set! Set TG_TOKEN in GitHub Secrets');
 
-/* ================= Local Bot API Server (2GB upload limit) ================= */
 const API_ROOT = process.env.BOT_API_SERVER || 'https://api.telegram.org';
 
 async function registerLocalToken(apiRoot, token) {
@@ -37,7 +44,6 @@ async function registerLocalToken(apiRoot, token) {
   }
 }
 
-/* ================= Bot instance ================= */
 const bot = new Telegraf(BOT_TOKEN, {
   apiRoot: API_ROOT,
   handlerTimeout: 900000
@@ -49,7 +55,6 @@ if (process.env.BOT_API_SERVER) {
   });
 }
 
-/* ================= Global error handler ================= */
 bot.catch((err, ctx) => {
   console.error('❌ Bot error:', err);
   try {
@@ -57,7 +62,6 @@ bot.catch((err, ctx) => {
   } catch {}
 });
 
-/* ================= Commands ================= */
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand(ctx));
@@ -70,31 +74,24 @@ bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
 bot.command('ss', (ctx) => cmdSinhalasub(ctx));
 bot.command('mb', (ctx) => cmdMoviebox(ctx));
 bot.command('ai', (ctx) => cmdAi(ctx));
-bot.command('aiz', (ctx) => cmdAi2(ctx)); // <-- අලුතෙන් add කරා
+if (cmdAi2) bot.command('ai2', (ctx) => cmdAi2(ctx));
 bot.command('img', (ctx) => cmdImg(ctx));
 bot.command('reset', (ctx) => cmdReset(ctx));
 
-/* ================= Text routing ================= */
 bot.on('text', (ctx) => {
   cacheMessage(ctx);
   if (isSocialCommand(ctx)) return handleDlCommand(ctx);
   return handleText(ctx);
 });
 
-/* ================= Media cache ================= */
 ['video', 'photo', 'document', 'animation'].forEach(t => {
   bot.on(t, (ctx) => cacheMessage(ctx));
 });
 
-/* ================= Callback routing ================= */
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
-  if (data.startsWith('bscd_') || data.startsWith('bsc_')) {
-    return handleSubCallback(ctx);
-  }
-  if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
-    return handleYtCallback(ctx);
-  }
+  if (data.startsWith('bscd_') || data.startsWith('bsc_')) return handleSubCallback(ctx);
+  if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) return handleYtCallback(ctx);
   if (data.startsWith('ytm_')) return handleYtmCallback(ctx);
   if (data.startsWith('ssq_')) return handleSsCallback(ctx);
   if (data.startsWith('ss_')) return handleSsCallback(ctx);
@@ -102,13 +99,10 @@ bot.on('callback_query', (ctx) => {
   if (data.startsWith('csz_')) return handleCszCallback(ctx);
   if (data.startsWith('mbq_')) return handleMbCallback(ctx);
   if (data.startsWith('mb_')) return handleMbCallback(ctx);
-  if (data.startsWith('vid_') || data.startsWith('aud_')) {
-    return handleDlCallback(ctx);
-  }
+  if (data.startsWith('vid_') || data.startsWith('aud_')) return handleDlCallback(ctx);
   return handleCallback(ctx);
 });
 
-/* ================= Launch (with retry) ================= */
 const MAX_RETRIES = 5;
 const RETRY_DELAY = 15000;
 let launched = false;
@@ -117,7 +111,7 @@ async function launchWithRetry(attempt = 1) {
   try {
     await bot.launch();
     launched = true;
-    console.log('Bot Started ✅ Modular v8.0 (+ AI: /ai /aiz /img /reset)');
+    console.log('Bot Started ✅ Modular v8.0 (+ AI: /ai /ai2 /img /reset)');
   } catch (e) {
     console.error(`❌ Launch attempt ${attempt} failed:`, e.message);
     if (attempt < MAX_RETRIES) {
