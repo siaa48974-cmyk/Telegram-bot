@@ -1,4 +1,4 @@
-// index.js — Modular v7.9 (+ Baiscope /sub, YouTube /yt, YouTube Music /song, global error handler, retry launch)
+// index.js — Modular v8.0 (+ AI: Llama 3 chat /ai, image gen /img, /reset)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -10,6 +10,7 @@ const { cmdMoviebox, handleMbCallback } = require('./handlers/moviebox');
 const { cmdYt, handleYtCallback } = require('./handlers/yt');
 const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
 const { cmdSong, handleYtmCallback } = require('./handlers/ytm');
+const { cmdAi, cmdImg, cmdReset } = require('./handlers/ai');
 
 // ==== මෙතන වෙනස් කරලා තියෙන්නේ ====
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
@@ -67,6 +68,9 @@ bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
 bot.command('ss', (ctx) => cmdSinhalasub(ctx));
 bot.command('mb', (ctx) => cmdMoviebox(ctx));
+bot.command('ai', (ctx) => cmdAi(ctx));
+bot.command('img', (ctx) => cmdImg(ctx));
+bot.command('reset', (ctx) => cmdReset(ctx));
 
 /* ================= Text routing ================= */
 bot.on('text', (ctx) => {
@@ -111,7 +115,7 @@ async function launchWithRetry(attempt = 1) {
   try {
     await bot.launch();
     launched = true;
-    console.log('Bot Started ✅ Modular v7.9 (+ /song)');
+    console.log('Bot Started ✅ Modular v8.0 (+ AI: /ai /img /reset)');
   } catch (e) {
     console.error(`❌ Launch attempt ${attempt} failed:`, e.message);
     if (attempt < MAX_RETRIES) {
