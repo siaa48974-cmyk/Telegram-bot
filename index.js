@@ -1,19 +1,10 @@
-const fs = require('fs');
-const path = require('path');
 const { Telegraf } = require('telegraf');
 
-// Safe loader - file එක නැතත් crash වෙන්නේ නෑ
 function safeRequire(p) {
-  try {
-    const full = path.join(__dirname, p);
-    if (fs.existsSync(full)) return require(full);
-  } catch (e) {
-    console.log(`Load failed ${p}: ${e.message}`);
-  }
-  return null;
+  try { return require(p); } 
+  catch (e) { console.log(`Load failed ${p}: ${e.message}`); return null; }
 }
 
-// Handlers Load
 const aliveMod = safeRequire('./handlers/alive');
 const downloader = safeRequire('./handlers/downloader') || {};
 const social = safeRequire('./handlers/social') || {};
@@ -28,10 +19,7 @@ const ai = safeRequire('./handlers/ai') || {};
 const ai2 = safeRequire('./handlers/ai2');
 const siaa_pro = safeRequire('./handlers/siaa_pro');
 
-// Destructure with fallback
-const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => {
-  await ctx.reply('🤖 Bot Alive ✅\n\nAlive handler නැහැ, handlers/alive.js හදන්න');
-});
+const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => ctx.reply('🤖 Bot Alive ✅'));
 const { handleText, handleCallback } = downloader;
 const { handleDlCommand, handleDlCallback, isSocialCommand } = social;
 const { cacheMessage, cmdShare, cmdId } = share;
@@ -48,12 +36,8 @@ const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js න�
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
 
-const bot = new Telegraf(BOT_TOKEN, {
-  apiRoot: process.env.BOT_API_SERVER || 'https://api.telegram.org',
-  handlerTimeout: 900000
-});
+const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 900000 });
 
-// Commands
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand && handleDlCommand(ctx));
@@ -72,44 +56,23 @@ bot.command('siaapro', (ctx) => cmdPro(ctx));
 bot.command('img', (ctx) => cmdImg && cmdImg(ctx));
 bot.command('reset', (ctx) => cmdReset && cmdReset(ctx));
 
-// Photo + Voice for Pro
-bot.on('photo', (ctx) => {
-  if (cacheMessage) cacheMessage(ctx);
-  const cap = ctx.message.caption || '';
-  if (cap.startsWith('/pro') || cap.startsWith('/siaapro') || cap.startsWith('/ai2')) {
-    return cap.startsWith('/pro') || cap.startsWith('/siaapro') ? cmdPro(ctx) : cmdAi2(ctx);
-  }
-});
-
-bot.on('voice', (ctx) => {
-  if (cacheMessage) cacheMessage(ctx);
-  return cmdPro(ctx);
-});
-
-bot.on('text', (ctx) => {
-  if (cacheMessage) cacheMessage(ctx);
-  if (isSocialCommand && isSocialCommand(ctx)) return handleDlCommand(ctx);
-  if (handleText) return handleText(ctx);
-});
-
-['video', 'document', 'animation'].forEach(t => {
-  bot.on(t, (ctx) => cacheMessage && cacheMessage(ctx));
-});
+bot.on('photo', (ctx) => { if(cacheMessage) cacheMessage(ctx); const cap=ctx.message.caption||''; if(cap.startsWith('/pro')||cap.startsWith('/siaapro')) return cmdPro(ctx); });
+bot.on('voice', (ctx) => { if(cacheMessage) cacheMessage(ctx); return cmdPro(ctx); });
+bot.on('text', (ctx) => { if(cacheMessage) cacheMessage(ctx); if(isSocialCommand && isSocialCommand(ctx)) return handleDlCommand(ctx); if(handleText) return handleText(ctx); });
+['video','document','animation'].forEach(t=>{ bot.on(t,(ctx)=> cacheMessage && cacheMessage(ctx)); });
 
 bot.on('callback_query', (ctx) => {
   const d = ctx.callbackQuery?.data || '';
   if (d === 'alive_refresh') return aliveHandler(ctx);
-  if (d.startsWith('bscd_') || d.startsWith('bsc_')) return handleSubCallback && handleSubCallback(ctx);
-  if (d.startsWith('ytsel_') || d.startsWith('ytv_') || d.startsWith('yta_')) return handleYtCallback && handleYtCallback(ctx);
+  if (d.startsWith('bscd_')||d.startsWith('bsc_')) return handleSubCallback && handleSubCallback(ctx);
+  if (d.startsWith('ytsel_')||d.startsWith('ytv_')||d.startsWith('yta_')) return handleYtCallback && handleYtCallback(ctx);
   if (d.startsWith('ytm_')) return handleYtmCallback && handleYtmCallback(ctx);
   if (d.startsWith('ss_')) return handleSsCallback && handleSsCallback(ctx);
   if (d.startsWith('csz_')) return handleCszCallback && handleCszCallback(ctx);
   if (d.startsWith('mb_')) return handleMbCallback && handleMbCallback(ctx);
-  if (d.startsWith('vid_') || d.startsWith('aud_')) return handleDlCallback && handleDlCallback(ctx);
+  if (d.startsWith('vid_')||d.startsWith('aud_')) return handleDlCallback && handleDlCallback(ctx);
   if (handleCallback) return handleCallback(ctx);
 });
 
-bot.launch().then(() => console.log('✅ Bot Started - Alive + SiAA Pro Ready')).catch(e => { console.error(e); process.exit(1); });
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.launch().then(()=>console.log('✅ Bot Started - Alive Fixed')).catch(e=>{console.error(e);process.exit(1);});
+process.once('SIGINT',()=>bot.stop('SIGINT')); process.once('SIGTERM',()=>bot.stop('SIGTERM'));
