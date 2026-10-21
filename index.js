@@ -2,19 +2,19 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
 
-// Safe load function
-function safeRequire(filePath) {
+// Safe loader - file එක නැතත් crash වෙන්නේ නෑ
+function safeRequire(p) {
   try {
-    if (fs.existsSync(filePath)) {
-      return require(filePath);
-    }
+    const full = path.join(__dirname, p);
+    if (fs.existsSync(full)) return require(full);
   } catch (e) {
-    console.log(`Failed to load ${filePath}: ${e.message}`);
+    console.log(`Load failed ${p}: ${e.message}`);
   }
   return null;
 }
 
-const aliveHandler = safeRequire('./handlers/alive')?.aliveHandler || ((ctx) => ctx.reply('Bot Alive ✅'));
+// Handlers Load
+const aliveMod = safeRequire('./handlers/alive');
 const downloader = safeRequire('./handlers/downloader') || {};
 const social = safeRequire('./handlers/social') || {};
 const share = safeRequire('./handlers/share') || {};
@@ -28,6 +28,10 @@ const ai = safeRequire('./handlers/ai') || {};
 const ai2 = safeRequire('./handlers/ai2');
 const siaa_pro = safeRequire('./handlers/siaa_pro');
 
+// Destructure with fallback
+const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => {
+  await ctx.reply('🤖 Bot Alive ✅\n\nAlive handler නැහැ, handlers/alive.js හදන්න');
+});
 const { handleText, handleCallback } = downloader;
 const { handleDlCommand, handleDlCallback, isSocialCommand } = social;
 const { cacheMessage, cmdShare, cmdId } = share;
@@ -38,8 +42,8 @@ const { cmdYt, handleYtCallback } = yt;
 const { cmdSub, handleSubCallback } = baiscope;
 const { cmdSong, handleYtmCallback } = ytm;
 const { cmdAi, cmdImg, cmdReset } = ai;
-const cmdAi2 = ai2?.cmdAi2 || ((ctx) => ctx.reply('⚠️ ai2.js file එක නෑ, හදන්න'));
-const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js file එක නෑ, හදන්න'));
+const cmdAi2 = ai2?.cmdAi2 || ((ctx) => ctx.reply('⚠️ ai2.js නෑ'));
+const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js නෑ'));
 
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
@@ -49,6 +53,7 @@ const bot = new Telegraf(BOT_TOKEN, {
   handlerTimeout: 900000
 });
 
+// Commands
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand && handleDlCommand(ctx));
@@ -67,19 +72,22 @@ bot.command('siaapro', (ctx) => cmdPro(ctx));
 bot.command('img', (ctx) => cmdImg && cmdImg(ctx));
 bot.command('reset', (ctx) => cmdReset && cmdReset(ctx));
 
+// Photo + Voice for Pro
 bot.on('photo', (ctx) => {
-  cacheMessage && cacheMessage(ctx);
+  if (cacheMessage) cacheMessage(ctx);
   const cap = ctx.message.caption || '';
-  if (cap.startsWith('/pro') || cap.startsWith('/siaapro')) return cmdPro(ctx);
+  if (cap.startsWith('/pro') || cap.startsWith('/siaapro') || cap.startsWith('/ai2')) {
+    return cap.startsWith('/pro') || cap.startsWith('/siaapro') ? cmdPro(ctx) : cmdAi2(ctx);
+  }
 });
 
 bot.on('voice', (ctx) => {
-  cacheMessage && cacheMessage(ctx);
+  if (cacheMessage) cacheMessage(ctx);
   return cmdPro(ctx);
 });
 
 bot.on('text', (ctx) => {
-  cacheMessage && cacheMessage(ctx);
+  if (cacheMessage) cacheMessage(ctx);
   if (isSocialCommand && isSocialCommand(ctx)) return handleDlCommand(ctx);
   if (handleText) return handleText(ctx);
 });
@@ -90,6 +98,7 @@ bot.on('text', (ctx) => {
 
 bot.on('callback_query', (ctx) => {
   const d = ctx.callbackQuery?.data || '';
+  if (d === 'alive_refresh') return aliveHandler(ctx);
   if (d.startsWith('bscd_') || d.startsWith('bsc_')) return handleSubCallback && handleSubCallback(ctx);
   if (d.startsWith('ytsel_') || d.startsWith('ytv_') || d.startsWith('yta_')) return handleYtCallback && handleYtCallback(ctx);
   if (d.startsWith('ytm_')) return handleYtmCallback && handleYtmCallback(ctx);
@@ -100,6 +109,7 @@ bot.on('callback_query', (ctx) => {
   if (handleCallback) return handleCallback(ctx);
 });
 
-bot.launch().then(() => console.log('Bot Started ✅ No Crash Mode')).catch(e => { console.error(e); process.exit(1); });
+bot.launch().then(() => console.log('✅ Bot Started - Alive + SiAA Pro Ready')).catch(e => { console.error(e); process.exit(1); });
+
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
