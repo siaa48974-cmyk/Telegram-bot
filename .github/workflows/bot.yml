@@ -9,6 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    # FlareSolverr — Cloudflare bypass (baiscope.lk එකට)
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
+          TZ: Asia/Colombo
+        # Health check — service ready නැතුව bot start වෙන්නේ නෑ
+        options: >-
+          --health-cmd "curl -f http://localhost:8191/ || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +56,19 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
+      - name: Verify FlareSolverr is up
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8191/ | grep -q .; then
+              echo "✅ FlareSolverr ready"
+              exit 0
+            fi
+            echo "⏳ FlareSolverr ස්ටාර්ට් වෙනවා... ($i/30)"
+            sleep 2
+          done
+          echo "⚠️ FlareSolverr ready නෑ — baiscope fallback direct mode එකට යනවා"
+          # Hard fail කරන්නේ නෑ — bot එකට අනිත් commands වැඩ කරන්න ඕනි
+
       - name: Setup local bot API server
         if: ${{ vars.LOCAL_BOT_API == 'true' }}
         run: echo "LOCAL_BOT_API_SERVER=true" >> $GITHUB_ENV
@@ -52,3 +81,4 @@ jobs:
           BOT_API_SERVER: ${{ secrets.BOT_API_SERVER }}
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FLARESOLVERR_URL: http://localhost:8191
