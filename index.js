@@ -1,4 +1,4 @@
-// index.js — Modular v8.0 (+ AI: Llama 3 chat /ai, image gen /img, /reset)
+// index.js — Modular v8.0 (+ AI: Llama 3 chat /ai, /ai2, image gen /img, /reset)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -11,6 +11,7 @@ const { cmdYt, handleYtCallback } = require('./handlers/yt');
 const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
 const { cmdSong, handleYtmCallback } = require('./handlers/ytm');
 const { cmdAi, cmdImg, cmdReset } = require('./handlers/ai');
+const { cmdAi2 } = require('./handlers/ai2'); // <-- අලුතෙන් add කරා
 
 // ==== මෙතන වෙනස් කරලා තියෙන්නේ ====
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
@@ -69,6 +70,7 @@ bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
 bot.command('ss', (ctx) => cmdSinhalasub(ctx));
 bot.command('mb', (ctx) => cmdMoviebox(ctx));
 bot.command('ai', (ctx) => cmdAi(ctx));
+bot.command('ai2', (ctx) => cmdAi2(ctx)); // <-- අලුතෙන් add කරා
 bot.command('img', (ctx) => cmdImg(ctx));
 bot.command('reset', (ctx) => cmdReset(ctx));
 
@@ -115,7 +117,7 @@ async function launchWithRetry(attempt = 1) {
   try {
     await bot.launch();
     launched = true;
-    console.log('Bot Started ✅ Modular v8.0 (+ AI: /ai /img /reset)');
+    console.log('Bot Started ✅ Modular v8.0 (+ AI: /ai /ai2 /img /reset)');
   } catch (e) {
     console.error(`❌ Launch attempt ${attempt} failed:`, e.message);
     if (attempt < MAX_RETRIES) {
