@@ -1,15 +1,16 @@
-// handlers/ai.js — Llama 3 (Groq) Chat + AI Image Generation (fixed: model fallback)
+// handlers/ai.js — SIAA AI (Groq Llama 3 chat + copyable code blocks + resources)
 const axios = require('axios');
 
 const GROQ_KEY = process.env.GROQ_API_KEY;
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// ==== Free tier models (fallback order) ====
+const BOT_NAME = 'SIAA AI';
+
 const MODELS = [
-  'llama-3.1-8b-instant',        // free tier ✅ fast
-  'openai/gpt-oss-20b',          // free tier ✅
-  'meta-llama/llama-4-scout-17b-16e-instruct', // free tier (Meta Llama 4)
-  'llama-3.3-70b-versatile'      // enterprise only — last try
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'llama-3.3-70b-versatile'
 ];
 let activeModel = null;
 
@@ -20,7 +21,11 @@ function getHistory(chatId) {
   return memory.get(chatId);
 }
 
-const SYSTEM_PROMPT = 'You are a helpful, friendly AI assistant. Reply in the same language the user uses (Sinhala, English, or mixed). Keep answers concise but informative.';
+const SYSTEM_PROMPT = `You are ${BOT_NAME}, a helpful, friendly AI assistant built into a Telegram bot.
+Rules:
+1. Reply in the same language the user uses (Sinhala, English, or mixed). Keep answers concise but informative.
+2. If you write any code, ALWAYS wrap it in a fenced code block with the language tag, e.g. \`\`\`python ... \`\`\` . The bot converts fenced blocks into copyable Telegram code boxes. NEVER explain code without showing it in a fenced block.
+3. If the user asks a factual/research question, append a "📚 Resources" section at the end listing 2-4 real, well-known source URLs (official docs, Wikipedia, MDN, GitHub, etc.) in markdown link format: - [Title](URL). Only include URLs you are confident exist. If none apply, skip the section.`;
 
 async function groqChat(messages) {
   if (!GROQ_KEY) throw new Error('GROQ_API_KEY not set in Secrets');
@@ -34,35 +39,74 @@ async function groqChat(messages) {
         model,
         messages,
         temperature: 0.7,
-        max_tokens: 1024
+        max_tokens: 2048
       }, {
         headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
         timeout: 60000
       });
-      activeModel = model;   // වැඩ කරන model එක remember කරගන්නවා
-      console.log(`✅ AI model in use: ${model}`);
+      activeModel = model;
+      console.log(`✅ ${BOT_NAME} model in use: ${model}`);
       return data.choices[0].message.content;
     } catch (e) {
       lastErr = e;
       const errMsg = e.response?.data?.error?.message || e.message;
       console.warn(`⚠️ Model ${model} failed: ${errMsg}`);
-      // model එකට access නැත්නම් ඊළඟ model එකට try කරනවා
       if (errMsg.includes('does not exist') || errMsg.includes('access') || errMsg.includes('decommissioned') || e.response?.status === 404 || e.response?.status === 403) {
         continue;
       }
-      // rate limit / වෙනත් error එකක් නම් throw කරනවා
       throw e;
     }
   }
   throw lastErr;
 }
 
-/* ============ /ai — Chat ============ */
+/* ==== Markdown → Telegram HTML converter (copyable code boxes) ==== */
+function mdToTelegramHtml(md) {
+  const parts = [];
+  const codeRe = /```(\w+)?\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = codeRe.exec(md)) !== null) {
+    parts.push(inline(md.slice(last, m.index)));
+    const lang = m[1] || '';
+    const code = escapeHtml(m[2].replace(/\n$/, ''));
+    // <pre><code class="language-x"> → Telegram එකේ "Copy text" button එක එනවා
+    parts.push(lang
+      ? `<pre><code class="language-${lang}">${code}</code></pre>`
+      : `<pre><code>${code}</code></pre>`);
+    last = m.index + m[0].length;
+  }
+  parts.push(inline(md.slice(last)));
+  return parts.join('');
+
+  function inline(s) {
+    s = escapeHtml(s);
+    s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    s = s.replace(/(^|\s)\*(?!\s)([^*]+?)\*(?=\s|$|[,.;:!?])/g, '$1<i>$2</i>');
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+    return s;
+  }
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+}
+
+async function safeEdit(ctx, msgId, text) {
+  const html = mdToTelegramHtml(text).slice(0, 4096);
+  try {
+    await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, html, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+  } catch (e) {
+    // HTML parse fail උනොත් plain text fallback
+    await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, text.slice(0, 4096));
+  }
+}
+
+/* ============ /ai — SIAA AI Chat ============ */
 async function cmdAi(ctx) {
   const prompt = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  if (!prompt) return ctx.reply('❗ භාවිතය: /ai <ඔයාගේ ප්‍රශ්නය>');
+  if (!prompt) return ctx.reply(`❗ භාවිතය: /ai <ඔයාගේ ප්‍රශ්නය>\n\n🤖 ${BOT_NAME} ට ඕන දෙයක් අහන්න. Code ඉල්ලුවොත් copy කරන්න පුළුවන් box එකක් විදිහට එනවා.`);
 
-  const thinking = await ctx.reply('🤔 හිතමින්...');
+  const thinking = await ctx.reply(`🤖 ${BOT_NAME} හිතමින්...`);
   try {
     const history = getHistory(ctx.chat.id);
     if (history.length === 0) history.push({ role: 'system', content: SYSTEM_PROMPT });
@@ -72,35 +116,35 @@ async function cmdAi(ctx) {
     const reply = await groqChat(history);
     history.push({ role: 'assistant', content: reply });
 
-    const text = `🤖 ${reply}`.slice(0, 4096);
-    await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, text);
+    const text = `🤖 ${BOT_NAME}\n\n${reply}`;
+    await safeEdit(ctx, thinking.message_id, text);
   } catch (e) {
     console.error('AI error:', e.response?.data || e.message);
     const msg = e.response?.data?.error?.message || e.message;
-    await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, `⚠️ AI error: ${msg}`);
+    await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, `⚠️ ${BOT_NAME} error: ${msg}`);
   }
 }
 
 /* ============ /reset — clear chat memory ============ */
 async function cmdReset(ctx) {
   memory.delete(ctx.chat.id);
-  ctx.reply('🔄 Chat memory reset ✅');
+  ctx.reply(`🔄 ${BOT_NAME} chat memory reset ✅`);
 }
 
 /* ============ /img — AI image generation (Pollinations, free) ============ */
 async function cmdImg(ctx) {
   const prompt = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  if (!prompt) return ctx.reply('❗ භාවිතය: /img <image description>');
+  if (!prompt) return ctx.reply(`❗ භාවිතය: /img <image description>\n\n🎨 ${BOT_NAME} image generation භාවිතා කරන්න.`);
 
-  const msg = await ctx.reply('🎨 Image එක generate කරමින්...');
+  const msg = await ctx.reply(`🎨 ${BOT_NAME} image එක generate කරමින්...`);
   try {
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${Date.now() % 100000}`;
     const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 180000 });
     await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
-    await ctx.replyWithPhoto({ source: Buffer.from(res.data) }, { caption: `🎨 ${prompt}` });
+    await ctx.replyWithPhoto({ source: Buffer.from(res.data) }, { caption: `🎨 ${BOT_NAME}: ${prompt}` });
   } catch (e) {
     console.error('IMG error:', e.message);
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, '⚠️ Image generation failed. නැවත try කරන්න.');
+    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `⚠️ ${BOT_NAME}: Image generation failed. නැවත try කරන්න.`);
   }
 }
 
