@@ -77,7 +77,7 @@ async function doSearch(query) {
 
 async function cmdAi2(ctx) {
   const prompt = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  if (!prompt) return ctx.reply(`❗ භාවිතය: /ai2 <ප්‍රශ්නය>\nEx: /ai2 python වලින් bot එකක් හදන හැටි`);
+  if (!prompt) return ctx.reply(`❗ භාවිතය: /aiz <ප්‍රශ්නය>\nEx: /ai2 python වලින් bot එකක් හදන හැටි`);
 
   const thinking = await ctx.reply(`🤖 ${BOT_NAME_2} හිතනවා...`);
   try {
@@ -96,9 +96,9 @@ async function cmdAi2(ctx) {
 
     await safeEdit(ctx, thinking.message_id, `🤖 ${BOT_NAME_2}\n\n${reply}`);
   } catch (e) {
-    console.error('AI2 error:', e.message);
+    console.error('AIZ error:', e.message);
     await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, `⚠️ ${BOT_NAME_2} error, ආයේ try කරන්න.`);
   }
 }
 
-module.exports = { cmdAi2 };
+module.exports = { cmdAiz };
