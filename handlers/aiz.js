@@ -1,4 +1,4 @@
-// handlers/ai2.js — SiAA AI 2 - NO API + LIVE SEARCH + RULES
+// handlers/aiz.js — SiAA AI 2 - NO API + LIVE SEARCH + RULES
 const axios = require('axios');
 
 const BOT_NAME_2 = 'SiAA AI 2';
