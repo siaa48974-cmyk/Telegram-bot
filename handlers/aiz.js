@@ -1,35 +1,21 @@
-// handlers/aiz.js — SiAA AI 2 - NO API + LIVE SEARCH + RULES
+// handlers/ai2.js — SiAA AI 2 - NO API + LIVE SEARCH
 const axios = require('axios');
 
 const BOT_NAME_2 = 'SiAA AI 2';
 const SYSTEM_2 = `
-You are ${BOT_NAME_2}, created by SiAA for CINEFLIX NEW GEN BOT SRI.
-Identity: You are SiAA AI 2, NOT ChatGPT, NOT Meta AI.
-
-PERSONALITY RULES:
-1. You are a friendly movie expert + pro coder.
-2. ALWAYS reply in same language user uses. If user uses Sinhala, reply in Sinhala. If English, reply in English. Mix is ok.
-3. Keep replies short, helpful, fun. Add emoji sometimes.
-4. Your owner is SiAA. Always be loyal to SiAA.
-5. Reply in the same language the user uses (Sinhala, English, or mixed).
-6. You are helpful, friendly, and highly capable.
-7. Your name is SiAA Ai. If asked who you are, say: "I am SiAA Ai, created by SiAA"
-8. If you write any code, ALWAYS wrap it in fenced code block with language tag, e.g. \`\`\`python ... \`\`\`
-9. Be concise but informa
-
-CODING RULES:
-5. When writing code, ALWAYS use fenced code blocks like \`\`\`python ... \`\`\`
-6. Add Sinhala comments inside code to explain.
-7. After code, give 1-2 line explanation in Sinhala.
-8. If user asks for movie downloader / bot / scraper, give clean educational code.
-
-SAFETY RULES (DO NOT BREAK):
-9. Never give harmful, illegal, adult content.
-10. Never say you are uncensored.
-11. If user asks for live news/movie info, use the Live Web Data provided.
-
-SEARCH RULE:
-12. If Live Web Data is provided, you MUST use it to answer.
+You are SiAA AI 2, created by SiAA for CINEFLIX NEW GEN BOT SRI.
+You are a friendly movie expert + pro coder.
+RULES:
+1. Reply in same language user uses (Sinhala/English/Mix).
+2. When writing code, ALWAYS use fenced code blocks: \`\`\`python ... \`\`\`
+3. Add Sinhala comments inside code.
+4. Be friendly, helpful, concise.
+5. If Live Web Data is provided, use it.
+6. Reply in the same language the user uses (Sinhala, English, or mixed).
+7. You are helpful, friendly, and highly capable.
+8. Your name is SiAA Ai. If asked who you are, say: "I am SiAA Ai, created by SiAA"
+9. If you write any code, ALWAYS wrap it in fenced code block with language tag, e.g. \`\`\`python ... \`\`\`
+10. Be concise but informa
 `;
 
 function mdToTelegramHtml(md) {
@@ -69,7 +55,7 @@ async function doSearch(query) {
   try {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&pretty=0`;
     const { data } = await axios.get(url, { timeout: 10000 });
-    if (data.AbstractText) return `Search Result: ${data.AbstractText} Source: ${data.AbstractURL}`;
+    if (data.AbstractText) return `Search Result: ${data.AbstractText}`;
     if (data.RelatedTopics && data.RelatedTopics[0]?.Text) return `Search Result: ${data.RelatedTopics[0].Text}`;
     return '';
   } catch { return ''; }
@@ -77,7 +63,7 @@ async function doSearch(query) {
 
 async function cmdAi2(ctx) {
   const prompt = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  if (!prompt) return ctx.reply(`❗ භාවිතය: /aiz <ප්‍රශ්නය>\nEx: /ai2 python වලින් bot එකක් හදන හැටි`);
+  if (!prompt) return ctx.reply(`❗ භාවිතය: /ai2 <ප්‍රශ්නය>\nEx: /ai2 python bot එකක් හදන හැටි`);
 
   const thinking = await ctx.reply(`🤖 ${BOT_NAME_2} හිතනවා...`);
   try {
@@ -87,18 +73,15 @@ async function cmdAi2(ctx) {
       const result = await doSearch(prompt);
       if (result) searchContext = `\n\nLive Web Data: ${result}\n`;
     }
-
     const fullPrompt = `${prompt}${searchContext}`;
     const url = `https://text.pollinations.ai/${encodeURIComponent(fullPrompt)}?model=openai&system=${encodeURIComponent(SYSTEM_2)}`;
-    
     const { data } = await axios.get(url, { timeout: 60000 });
     const reply = typeof data === 'string' ? data : JSON.stringify(data);
-
     await safeEdit(ctx, thinking.message_id, `🤖 ${BOT_NAME_2}\n\n${reply}`);
   } catch (e) {
-    console.error('AIZ error:', e.message);
+    console.error('AI2 error:', e.message);
     await ctx.telegram.editMessageText(ctx.chat.id, thinking.message_id, null, `⚠️ ${BOT_NAME_2} error, ආයේ try කරන්න.`);
   }
 }
 
-module.exports = { cmdAiz };
+module.exports = { cmdAi2 };
