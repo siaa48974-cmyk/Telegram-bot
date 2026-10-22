@@ -1,8 +1,14 @@
 name: Bot
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
+# GH_TOKEN එකෙන් workflow re-dispatch කරන්න permissions
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   bot:
@@ -18,7 +24,6 @@ jobs:
         env:
           LOG_LEVEL: info
           TZ: Asia/Colombo
-        # Health check — service ready නැතුව bot start වෙන්නේ නෑ
         options: >-
           --health-cmd "curl -f http://localhost:8191/ || exit 1"
           --health-interval 10s
@@ -67,14 +72,24 @@ jobs:
             sleep 2
           done
           echo "⚠️ FlareSolverr ready නෑ — baiscope fallback direct mode එකට යනවා"
-          # Hard fail කරන්නේ නෑ — bot එකට අනිත් commands වැඩ කරන්න ඕනි
 
       - name: Setup local bot API server
         if: ${{ vars.LOCAL_BOT_API == 'true' }}
         run: echo "LOCAL_BOT_API_SERVER=true" >> $GITHUB_ENV
 
-      - name: Run bot
-        run: node index.js
+      - name: Run bot (5h50m) + auto restart
+        run: |
+          node index.js &
+          BOT_PID=$!
+          echo "🚀 Bot started (PID: $BOT_PID)"
+          echo "⏳ පැය 5:50ක් run වෙනවා... (GitHub 360min limit එකට කලින්)"
+
+          # 21000 seconds = 5 hours 50 minutes
+          sleep 21000
+
+          echo "⏰ 5h50m ඉවර — bot එක stop කරලා fresh run එකක් trigger කරනවා"
+          kill $BOT_PID 2>/dev/null || true
+          sleep 5
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -82,3 +97,15 @@ jobs:
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FLARESOLVERR_URL: http://localhost:8191
+
+      - name: Re-run workflow (keep alive 24/7)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 60
+          gh api \
+            --method POST \
+            repos/${{ github.repository }}/actions/workflows/${{ github.event_name && 'Bot' || 'Bot' }}.yml/dispatches \
+            -f ref=${{ github.ref_name }}
+          echo "✅ අලුත් Bot run එකක් trigger කළා — bot 24/7 alive"
