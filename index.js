@@ -36,7 +36,15 @@ const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js න�
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
 
-const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 900000 });
+// Local Bot API Server support — 2GB upload සඳහා
+const LOCAL_API = process.env.LOCAL_API_URL || 'https://api.telegram.org';
+
+const bot = new Telegraf(BOT_TOKEN, {
+  handlerTimeout: 900000,
+  telegram: {
+    apiRoot: LOCAL_API
+  }
+});
 
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
@@ -74,5 +82,5 @@ bot.on('callback_query', (ctx) => {
   if (handleCallback) return handleCallback(ctx);
 });
 
-bot.launch().then(()=>console.log('✅ Bot Started - Alive Fixed')).catch(e=>{console.error(e);process.exit(1);});
+bot.launch().then(()=>console.log(`✅ Bot Started via ${LOCAL_API}`)).catch(e=>{console.error(e);process.exit(1);});
 process.once('SIGINT',()=>bot.stop('SIGINT')); process.once('SIGTERM',()=>bot.stop('SIGTERM'));
