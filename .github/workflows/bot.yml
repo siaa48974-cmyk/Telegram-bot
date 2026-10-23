@@ -5,7 +5,6 @@ on:
   push:
     branches: [main]
 
-# GH_TOKEN එකෙන් workflow re-dispatch කරන්න permissions
 permissions:
   actions: write
   contents: read
@@ -15,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
-    # FlareSolverr — Cloudflare bypass (baiscope.lk එකට)
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -40,6 +38,35 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+
+      # 2GB files වලට runner disk එක ලොකු කරනවා (~45GB free)
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
+
+      # Local Bot API Server — upload limit 50MB -> 2GB
+      - name: Start Local Bot API Server
+        run: |
+          docker run -d --name tg-api \
+            -p 8081:8081 \
+            -v /tmp/tg-data:/var/lib/telegram-bot-api \
+            aiogram/telegram-bot-api:latest \
+            --api-id=${{ secrets.API_ID }} \
+            --api-hash=${{ secrets.API_HASH }} \
+            --local \
+            --http-port=8081
+
+          echo "⏳ Local Bot API server ready වෙනකම් wait..."
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:8081/bot${{ secrets.TG_TOKEN }}/getMe" > /dev/null; then
+              echo "✅ Local Bot API Server ready — 2GB upload enabled"
+              break
+            fi
+            echo "   ($i/30)"
+            sleep 2
+          done
 
       - name: Install yt-dlp
         run: |
@@ -71,11 +98,7 @@ jobs:
             echo "⏳ FlareSolverr ස්ටාර්ට් වෙනවා... ($i/30)"
             sleep 2
           done
-          echo "⚠️ FlareSolverr ready නෑ — baiscope fallback direct mode එකට යනවා"
-
-      - name: Setup local bot API server
-        if: ${{ vars.LOCAL_BOT_API == 'true' }}
-        run: echo "LOCAL_BOT_API_SERVER=true" >> $GITHUB_ENV
+          echo "⚠️ FlareSolverr ready නෑ — baiscope fallback direct mode එකට යන්නේ"
 
       - name: Run bot (5h50m) + auto restart
         run: |
@@ -84,7 +107,6 @@ jobs:
           echo "🚀 Bot started (PID: $BOT_PID)"
           echo "⏳ පැය 5:50ක් run වෙනවා... (GitHub 360min limit එකට කලින්)"
 
-          # 21000 seconds = 5 hours 50 minutes
           sleep 21000
 
           echo "⏰ 5h50m ඉවර — bot එක stop කරලා fresh run එකක් trigger කරනවා"
@@ -97,6 +119,7 @@ jobs:
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FLARESOLVERR_URL: http://localhost:8191
+          LOCAL_API_URL: http://localhost:8081
 
       - name: Re-run workflow (keep alive 24/7)
         if: always()
@@ -106,6 +129,6 @@ jobs:
           sleep 60
           gh api \
             --method POST \
-            repos/${{ github.repository }}/actions/workflows/${{ github.event_name && 'Bot' || 'Bot' }}.yml/dispatches \
+            repos/${{ github.repository }}/actions/workflows/Bot.yml/dispatches \
             -f ref=${{ github.ref_name }}
           echo "✅ අලුත් Bot run එකක් trigger කළා — bot 24/7 alive"
