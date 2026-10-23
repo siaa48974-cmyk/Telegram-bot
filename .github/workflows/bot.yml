@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
 
+# --- DUPLICATE FIX එක ---
+concurrency:
+  group: telegram-bot-single
+  cancel-in-progress: true
+
 permissions:
   actions: write
   contents: read
@@ -21,11 +26,6 @@ jobs:
         env:
           LOG_LEVEL: info
           TZ: Asia/Colombo
-        options: >-
-          --health-cmd "curl -f http://localhost:8191/ || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
 
     steps:
       - uses: actions/checkout@v4
@@ -44,12 +44,10 @@ jobs:
           sudo docker image prune -af
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg libnss3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 libasound2t64 libxss1 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libcups2 libpango-1.0-0 libcairo2 libxshmfence1
-          sudo pip3 install -q yt-dlp -U || pip3 install -q yt-dlp -U
-          ffmpeg -version
-          yt-dlp --version
+          sudo pip3 install -q yt-dlp -U
           df -h /
 
-      - name: Start Local Bot API (2GB) - FIXED
+      - name: Start Local Bot API (2GB)
         run: |
           docker rm -f tg-api 2>/dev/null || true
           docker run -d --name tg-api -p 8081:8081 \
@@ -57,7 +55,6 @@ jobs:
             -e TELEGRAM_API_HASH=${{ secrets.API_HASH }} \
             -e TELEGRAM_LOCAL=1 \
             aiogram/telegram-bot-api:latest
-          
           echo "⏳ Local API Ready වෙනකම්..."
           for i in {1..40}; do
             if curl -sf http://127.0.0.1:8081/bot${{ secrets.TG_TOKEN }}/getMe > /dev/null 2>&1; then
@@ -67,29 +64,23 @@ jobs:
             echo "waiting $i/40"
             sleep 3
           done
-          docker logs tg-api --tail 30
+          docker logs tg-api --tail 20
 
       - name: Install npm
         run: npm install
 
       - name: Verify FlareSolverr
         run: |
-          for i in {1..30}; do
-            if curl -s http://localhost:8191/ | grep -q .; then
-              echo "✅ FlareSolverr ready"
-              exit 0
-            fi
-            echo "⏳ FlareSolverr... ($i/30)"
+          for i in {1..20}; do
+            if curl -s http://localhost:8191/ | grep -q .; then echo "✅ FlareSolverr ready"; exit 0; fi
             sleep 2
           done
-          echo "⚠️ FlareSolverr not ready - fallback"
 
       - name: Run bot (5h50m)
         run: |
           node index.js &
           BOT_PID=$!
           echo "🚀 Bot started PID $BOT_PID via http://localhost:8081"
-          echo "Waiting 5h50m (21000s)..."
           sleep 21000
           kill $BOT_PID 2>/dev/null || true
         env:
