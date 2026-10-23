@@ -36,7 +36,6 @@ const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js න�
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
 
-// Local Bot API Server support — 2GB upload සඳහා
 const LOCAL_API = process.env.LOCAL_API_URL || 'https://api.telegram.org';
 
 const bot = new Telegraf(BOT_TOKEN, {
@@ -82,5 +81,17 @@ bot.on('callback_query', (ctx) => {
   if (handleCallback) return handleCallback(ctx);
 });
 
-bot.launch().then(()=>console.log(`✅ Bot Started via ${LOCAL_API}`)).catch(e=>{console.error(e);process.exit(1);});
-process.once('SIGINT',()=>bot.stop('SIGINT')); process.once('SIGTERM',()=>bot.stop('SIGTERM'));
+// --- DUPLICATE FIX ---
+(async () => {
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('🧹 Webhook deleted & pending updates dropped');
+  } catch(e) { console.log('Webhook delete skip:', e.message); }
+
+  bot.launch({ dropPendingUpdates: true })
+    .then(()=>console.log(`✅ Bot Started via ${LOCAL_API} - Single Instance`))
+    .catch(e=>{console.error(e);process.exit(1);});
+})();
+
+process.once('SIGINT',()=>bot.stop('SIGINT')); 
+process.once('SIGTERM',()=>bot.stop('SIGTERM'));
