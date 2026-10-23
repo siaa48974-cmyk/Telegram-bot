@@ -1,5 +1,6 @@
-// handlers/sinhalasub.js — sinhalasub.lk → OMDB info + direct upload
-// Quality: 480p / 720p / 1080p | Puppeteer නැතුව axios-only resolve
+// handlers/sinhalasub.js — sinhalasub.lk → OMDB info + Telegram direct upload
+// Quality: 480p / 720p / 1080p | Puppeteer නැහැ — axios-only resolve
+// Search: URL-pattern based (theme-independent) | OMDB: poster + details
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -25,34 +26,37 @@ const cacheSet = (k, v, ttl = 30 * 60 * 1000) => {
 /* ================= OMDB ================= */
 async function fetchOmdb(title) {
   if (!OMDB_KEY) return null;
-  const clean = title.replace(/\((19|20)\d{2}\)/g, '').replace(/\[.*?\]/g, '')
-                     .replace(/\s*[-–|]\s*sinhalasub.*$/i, '').trim();
-  const yearMatch = title.match(/\((19|20)\d{2}\)/);
+  const clean = title
+    .replace(/\s*(19|20)\d{2}[^\)]*\)/g, '')       // (2024) etc.
+    .replace(/\s*[-–|]\s*Sinhala.*$/i, '')          // "| Sinhala Subtitles" etc.
+    .replace(/Sinhala\s*Subtitles?.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const yearMatch = title.match(/\((19|20)\d{2}/);
   try {
     let url = `https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=${encodeURIComponent(clean)}&plot=short`;
-    if (yearMatch) url += `&y=${yearMatch[0].replace(/[()]/g, '')}`;
+    if (yearMatch) url += `&y=${yearMatch[0].replace('(', '')}`;
     const { data } = await axios.get(url, { timeout: 15000 });
     if (data.Response === 'True') return data;
-    // series fallback: episode/season title strip
-    const t2 = clean.split(/S\d{2}E?\d*|episode/i)[0].trim();
-    if (t2 && t2 !== clean) {
-      const { data: d2 } = await axios.get(`https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=${encodeURIComponent(t2)}&plot=short`, { timeout: 15000 });
-      if (d2.Response === 'True') return d2;
-    }
+    // TV/fallback: year නැතුව ආයේ try
+    const { data: d2 } = await axios.get(
+      `https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=${encodeURIComponent(clean)}&plot=short`,
+      { timeout: 15000 });
+    if (d2.Response === 'True') return d2;
   } catch (e) { console.error('omdb:', e.message); }
   return null;
 }
 
 function fmtOmdb(m) {
   if (!m) return '';
-  const g = (k) => m[k] && m[k] !== 'N/A' ? m[k] : '—';
+  const g = (k) => (m[k] && m[k] !== 'N/A') ? m[k] : '—';
   return `\n☘️ *${m.Title} (${g('Year')})*\n` +
-    `▫️📅 𝗥𝗲𝗹𝗲𝗮𝘀𝗲 ☛ ${g('Released')}\n` +
-    `▫️⏱ 𝗗ᴜʀᴀᴛɪᴏɴ ☛ ${g('Runtime')}\n` +
-    `▫️⭐ 𝗜𝗠𝗗𝗕 ☛ ${g('imdbRating')}\n\n` +
-    `▫️🎭 𝗚ᴇɴʀᴇs ☛ ${g('Genre')}\n` +
-    `▫️🌎 𝗖ᴏᴜɴᴛʀʏ ☛ ${g('Country')}\n\n` +
-    `▫️📃 𝗗ᴇsᴄʀɪᴘᴛɪᴏɴ ☛ ${g('Plot')}\n`;
+    `*▫️📅 𝗥𝗲𝗹𝗲𝗮𝘀𝗲* ☛ ${g('Released')}\n` +
+    `*▫️⏱ 𝗗ᴜʀᴀᴛɪᴏɴ* ☛ ${g('Runtime')}\n` +
+    `*▫️⭐ 𝗜𝗠𝗗𝗕* ☛ ${g('imdbRating')}\n\n` +
+    `*▫️🎭 𝗚ᴇɴʀᴇs* ☛ ${g('Genre')}\n` +
+    `*▫️🌎 𝗖ᴏᴜɴᴛʀʏ* ☛ ${g('Country')}\n\n` +
+    `*▫️📃 𝗗ᴇsᴄʀɪᴘᴛɪᴏɴ* ☛ ${g('Plot')}\n`;
 }
 
 /* ================= 1. Search ================= */
@@ -60,15 +64,20 @@ async function search(query) {
   const { data } = await axios.get(`${BASE}/?s=${encodeURIComponent(query)}`, { headers, timeout: 20000 });
   const $ = cheerio.load(data);
   const out = [];
-  $('article, div.latest-post, div.post-item, li').each((_, el) => {
-    const a = $(el).find('a[href*="sinhalasub.lk/"]').first();
-    const href = a.attr('href');
-    const title = (a.attr('title') || a.text() || $(el).find('h2,h3,.title').text()).trim();
-    if (href && title && !out.find(x => x.url === href) && /\/20\d{2}\//.test(href)) {
-      out.push({ title, url: href });
-    }
+  const seen = new Set();
+
+  // URL-pattern based — theme එක මොනවා වුණත් වැඩ කරනවා
+  $('a').each((_, el) => {
+    const href = ($(el).attr('href') || '').split('?')[0].replace(/\/$/, '');
+    const title = ($(el).attr('title') || $(el).text() || '').replace(/\s+/g, ' ').trim();
+    if (!/sinhalasub\.lk\/(movies|tvshows)\/.+/.test(href)) return;
+    if (!title || title.length < 5) return;
+    if (seen.has(href)) return;
+    seen.add(href);
+    out.push({ title, url: href });
   });
-  return out.slice(0, 10);
+
+  return out.slice(0, 15);
 }
 
 /* ================= 2. Quality links ================= */
@@ -77,38 +86,58 @@ async function getQualityLinks(url) {
   const $ = cheerio.load(data);
   const links = [];
   const seen = new Set();
+
   $('a').each((_, el) => {
     const href = $(el).attr('href') || '';
-    const text = ($(el).text() || '') + ' ' + (href || '');
+    const text = ($(el).text() || '') + ' ' + href;
+    if (!/^https?:/.test(href)) return;
     let q = null;
     if (/1080/i.test(text)) q = 'FHD 1080p';
     else if (/720/i.test(text)) q = 'HD 720p';
     else if (/480/i.test(text)) q = 'SD 480p';
-    if (!q || !/^https?:/.test(href) || seen.has(href)) return;
-    seen.add(href);
+    if (!q) return;
+
+    // table rows වල server එකත් අල්ලන්න (DLServer-01/02, Dotflix වගේ)
+    const row = $(el).closest('tr');
+    const server = row.length ? ($(row).find('td').first().text() || '').trim() : '';
     const sizeMatch = text.match(/(\d+(?:\.\d+)?)\s*(GB|MB)/i);
-    links.push({ quality: q, url: href, size: sizeMatch ? sizeMatch[1] + sizeMatch[2].toUpperCase() : '' });
+    const key = href + q;
+    if (seen.has(key)) return;
+    seen.add(key);
+    links.push({
+      quality: q,
+      url: href,
+      size: sizeMatch ? sizeMatch[1] + sizeMatch[2].toUpperCase() : '',
+      server: server || 'Direct'
+    });
   });
+
   return links;
 }
 
-/* ================= 3. Direct resolve (Puppeteer නැතුව) ================= */
+/* ================= 3. Direct resolve ================= */
 async function resolveDirect(url) {
   // Pixeldrain direct
   const pd = url.match(/pixeldrain\.com\/u\/(\w+)/i);
   if (pd) return { directUrl: `https://pixeldrain.com/api/file/${pd[1]}?download` };
 
-  // FilesPayout / ddl / dlserver — follow redirects, get final URL
-  const { data, headers: h, request } = await axios.get(url, {
-    headers, timeout: 60000, maxRedirects: 10, responseType: 'stream'
-  }).then(r => ({ data: r.data, headers: r.headers, request: r.request }));
-  const finalUrl = request?.res?.responseUrl || request?._redirectable?._currentUrl || url;
-  data.destroy?.(); // stream එක close කරන්න — download body ගන්න ඕනෑ නෑ
+  // අනිත් hosts — redirect follow කරලා final URL එක ගන්නවා
+  try {
+    const res = await axios.get(url, {
+      headers, timeout: 60000, maxRedirects: 10, responseType: 'stream'
+    });
+    const finalUrl = res.request?.res?.responseUrl
+      || res.request?._redirectable?._currentUrl
+      || url;
+    res.data.destroy?.(); // body download නොකර stream එක close
 
-  if (/\.mp4|\.mkv|\.zip|\.rar/i.test(finalUrl) || /octet-stream|video/i.test(h['content-type'] || '')) {
-    return { directUrl: finalUrl };
-  }
-  // page එකක් නම් ඇතුළේ direct link හොයන්න
+    if (/\.mp4|\.mkv|\.zip|\.rar(\?|$)/i.test(finalUrl)
+      || /octet-stream|video/i.test(res.headers['content-type'] || '')) {
+      return { directUrl: finalUrl };
+    }
+  } catch (e) { /* page එකක් නම් පහළින් ආයේ try */ }
+
+  // Page එකක් නම් ඇතුළේ direct link හොයනවා
   const { data: html } = await axios.get(url, { headers, timeout: 30000 });
   const $ = cheerio.load(html);
   let found = null;
@@ -125,24 +154,25 @@ async function resolveDirect(url) {
 /* ================= 4. Download ================= */
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
-    axios.get(url, { headers, responseType: 'stream', timeout: 120000, maxContentLength: Infinity })
-      .then(res => {
-        const total = parseInt(res.headers['content-length'] || '0', 10);
-        let done = 0, lastPct = -1;
-        const ws = fs.createWriteStream(dest);
-        res.data.on('data', (c) => {
-          done += c.length;
-          if (total) {
-            const pct = Math.floor(done / total * 100);
-            if (pct !== lastPct) { lastPct = pct; onProgress?.(pct); }
-          }
-        });
-        res.data.pipe(ws);
-        ws.on('finish', resolve);
-        ws.on('error', reject);
-        res.data.on('error', reject);
-      })
-      .catch(reject);
+    axios.get(url, {
+      headers, responseType: 'stream', timeout: 120000,
+      maxContentLength: Infinity, maxBodyLength: Infinity
+    }).then(res => {
+      const total = parseInt(res.headers['content-length'] || '0', 10);
+      let done = 0, lastPct = -1;
+      const ws = fs.createWriteStream(dest);
+      res.data.on('data', (c) => {
+        done += c.length;
+        if (total) {
+          const pct = Math.floor(done / total * 100);
+          if (pct !== lastPct) { lastPct = pct; onProgress?.(pct); }
+        }
+      });
+      res.data.pipe(ws);
+      ws.on('finish', resolve);
+      ws.on('error', reject);
+      res.data.on('error', reject);
+    }).catch(reject);
   });
 }
 
@@ -154,8 +184,7 @@ function convertToMp4(inPath) {
     execFile('ffmpeg', ['-y', '-i', inPath, '-c', 'copy', '-movflags', '+faststart', outPath],
       { timeout: 30 * 60 * 1000 }, (err) => {
         if (err || !fs.existsSync(outPath)) {
-          // remux fail → stream-copy වැඩ නැත්නම් original එකම යවන්න try
-          return resolve({ outPath: inPath, reencoded: false });
+          return resolve({ outPath: inPath, reencoded: false }); // original එකම යවන්න
         }
         fs.unlink(inPath, () => {});
         resolve({ outPath, reencoded: false });
@@ -181,12 +210,13 @@ async function cmdSinhalasub(ctx) {
     const results = await search(q);
     if (!results.length) {
       ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
-      return ctx.reply('❌ Results නෑ. අක්ෂර වින්‍යාසය බලලා ආයේ try කරන්න.');
+      return ctx.reply(`❌ "${q}" සඳහා results නෑ.\n💡 වෙන title එකකින් උත්සාහ කරන්න (උදා: /ss fall)`);
     }
     cacheSet(`ss_r_${ctx.chat.id}`, results);
     const buttons = results.map((r, i) => [{ text: '🎬 ' + r.title.slice(0, 60), callback_data: `ss_${i}` }]);
-    await ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
-    await ctx.reply(`🎬 <b>${q}</b> — results:`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+    ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
+    await ctx.reply(`🎬 <b>${q}</b> — results:`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
   } catch (e) {
     console.error('ss search:', e.message);
     ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
@@ -197,7 +227,7 @@ async function cmdSinhalasub(ctx) {
 /* ================= Callback ================= */
 async function handleSsCallback(ctx) {
   const raw = ctx.callbackQuery?.data || '';
-  await ctx.answerCbQuery().catch(() => {});  // ✅ FIX: spinner එක කිටින්ම clear
+  await ctx.answerCbQuery().catch(() => {});  // spinner කිටින්ම clear — hang fix
   let quality = null, idx;
   if (raw.startsWith('ssq_')) { [, quality, idx] = raw.split('_'); }
   else { idx = raw.replace(/^ss_/, ''); }
@@ -208,7 +238,7 @@ async function handleSsCallback(ctx) {
   const post = cached?.v?.[idx];
   if (!post) return ctx.reply('⌛ Expired. නැවත /ss search කරන්න.');
 
-  /* ---- Step 1: film select → OMDB poster + details + quality buttons ---- */
+  /* ---- Step 1: film select → OMDB details + quality buttons ---- */
   if (!quality) {
     const status = await ctx.reply('⏳ Movie details + links බලනවා...', { parse_mode: 'HTML' });
     try {
@@ -230,7 +260,7 @@ async function handleSsCallback(ctx) {
       const caption = `🎬 <b>${post.title}</b>\n🔗 ${post.url}` + (omdb ? fmtOmdb(omdb) : '');
       ctx.telegram.deleteMessage(status.chat.id, status.message_id).catch(() => {});
 
-      // ✅ OMDB poster තියෙනවා නම් photo එකක් විදිහට + quality buttons ඒකම යටින්
+      // OMDB poster → photo විදිහට + quality buttons ඒකම යටින්
       if (omdb?.Poster && omdb.Poster !== 'N/A') {
         return ctx.replyWithPhoto({ url: omdb.Poster },
           { caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } })
@@ -265,7 +295,7 @@ async function handleSsCallback(ctx) {
     return ctx.reply(out, { parse_mode: 'HTML', disable_web_page_preview: true });
   }
 
-  /* ---- Step 2b: quality select → upload ---- */
+  /* ---- Step 2b: quality select → download → upload ---- */
   const qKey = quality === '1080' || quality === '1080p' ? 'FHD 1080p'
              : quality === '720'  || quality === '720p'  ? 'HD 720p'
              : quality === '480'  || quality === '480p'  ? 'SD 480p'
@@ -288,8 +318,15 @@ async function handleSsCallback(ctx) {
         `⬇️ Download: ${pct}%\n🎬 ${post.title}`, { parse_mode: 'HTML' }).catch(() => {});
     });
 
+    ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
+      '🎬 MP4 convert කරනවා... (mkv නම් ටිකක් යනවා)',
+      { parse_mode: 'HTML' }).catch(() => {});
     const conv = await convertToMp4(tmp);
+    console.log(`✅ Convert done: ${conv.outPath}`);
 
+    ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
+      '⬆️ Telegram එකට upload... (ලොකු file නම් 10-30min)',
+      { parse_mode: 'HTML' }).catch(() => {});
     await uploadMp4(ctx, conv.outPath,
       `🎬 <b>${post.title}</b>\n🎥 <b>${qKey}</b> • MP4\n🔗 ${post.url}`);
 
