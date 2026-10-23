@@ -52,18 +52,22 @@ jobs:
       - name: Start Local Bot API (2GB) - FIXED
         run: |
           docker rm -f tg-api 2>/dev/null || true
-          docker run -d --name tg-api -p 8081:8081 aiogram/telegram-bot-api:latest --local --http-port=8081 --api-id=${{ secrets.API_ID }} --api-hash=${{ secrets.API_HASH }}
+          docker run -d --name tg-api -p 8081:8081 \
+            -e TELEGRAM_API_ID=${{ secrets.API_ID }} \
+            -e TELEGRAM_API_HASH=${{ secrets.API_HASH }} \
+            -e TELEGRAM_LOCAL=1 \
+            aiogram/telegram-bot-api:latest
+          
           echo "⏳ Local API Ready වෙනකම්..."
           for i in {1..40}; do
             if curl -sf http://127.0.0.1:8081/bot${{ secrets.TG_TOKEN }}/getMe > /dev/null 2>&1; then
               echo "✅ Local API Ready - 2GB Enabled"
-              docker logs tg-api --tail 20
               break
             fi
             echo "waiting $i/40"
             sleep 3
-            if [ $i -eq 40 ]; then docker logs tg-api; fi
           done
+          docker logs tg-api --tail 30
 
       - name: Install npm
         run: npm install
