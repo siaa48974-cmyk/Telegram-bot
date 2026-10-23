@@ -1,19 +1,15 @@
 name: Bot
-
 on:
   workflow_dispatch:
   push:
     branches: [main]
-
 permissions:
   actions: write
   contents: read
-
 jobs:
   bot:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -22,113 +18,54 @@ jobs:
         env:
           LOG_LEVEL: info
           TZ: Asia/Colombo
-        options: >-
-          --health-cmd "curl -f http://localhost:8191/ || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
+        with: { node-version: '20' }
       - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
+        with: { deno-version: v2.x }
 
-      # 2GB files වලට runner disk එක ලොකු කරනවා (~45GB free)
-      - name: Free disk space
+      - name: Free disk + Fast Deps
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
           sudo docker image prune -af
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg libnss3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 libasound2t64 libxss1 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libcups2 libpango-1.0-0 libcairo2 libxshmfence1
+          sudo pip3 install -q yt-dlp -U
           df -h /
 
-      # Local Bot API Server — upload limit 50MB -> 2GB
-      - name: Start Local Bot API Server
+      - name: Start Local Bot API (2GB)
         run: |
-          docker run -d --name tg-api \
-            -p 8081:8081 \
-            -v /tmp/tg-data:/var/lib/telegram-bot-api \
-            aiogram/telegram-bot-api:latest \
-            --api-id=${{ secrets.API_ID }} \
-            --api-hash=${{ secrets.API_HASH }} \
-            --local \
-            --http-port=8081
+          docker run -d --name tg-api -p 8081:8081 -v /tmp/tg-data:/var/lib/telegram-bot-api aiogram/telegram-bot-api:latest --api-id=${{ secrets.API_ID }} --api-hash=${{ secrets.API_HASH }} --local --http-port=8081
+          for i in {1..30}; do if curl -sf http://localhost:8081/bot${{ secrets.TG_TOKEN }}/getMe > /dev/null; then echo "✅ Local API Ready - 2GB Enabled"; break; fi; sleep 2; done
 
-          echo "⏳ Local Bot API server ready වෙනකම් wait..."
-          for i in $(seq 1 30); do
-            if curl -sf "http://localhost:8081/bot${{ secrets.TG_TOKEN }}/getMe" > /dev/null; then
-              echo "✅ Local Bot API Server ready — 2GB upload enabled"
-              break
-            fi
-            echo "   ($i/30)"
-            sleep 2
-          done
-
-      - name: Install yt-dlp
-        run: |
-          sudo pip3 install --upgrade yt-dlp || pip3 install --upgrade yt-dlp
-          yt-dlp --version
-
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Install chromium dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 \
-            libasound2t64 libxss1 libx11-xcb1 libxcomposite1 \
-            libxdamage1 libxrandr2 libcups2 libpango-1.0-0 \
-            libcairo2 libxshmfence1 || true
-
-      - name: Install npm dependencies
+      - name: Install npm
         run: npm install
 
-      - name: Verify FlareSolverr is up
+      - name: Verify FlareSolverr
         run: |
-          for i in $(seq 1 30); do
-            if curl -s http://localhost:8191/ | grep -q .; then
-              echo "✅ FlareSolverr ready"
-              exit 0
-            fi
-            echo "⏳ FlareSolverr ස්ටාර්ට් වෙනවා... ($i/30)"
-            sleep 2
-          done
-          echo "⚠️ FlareSolverr ready නෑ — baiscope fallback direct mode එකට යන්නේ"
+          for i in {1..30}; do if curl -s http://localhost:8191/ | grep -q .; then echo "✅ FlareSolverr ready"; exit 0; fi; sleep 2; done
 
-      - name: Run bot (5h50m) + auto restart
+      - name: Run bot (5h50m)
         run: |
           node index.js &
-          BOT_PID=$!
-          echo "🚀 Bot started (PID: $BOT_PID)"
-          echo "⏳ පැය 5:50ක් run වෙනවා... (GitHub 360min limit එකට කලින්)"
-
+          echo "🚀 Bot started via $LOCAL_API_URL"
           sleep 21000
-
-          echo "⏰ 5h50m ඉවර — bot එක stop කරලා fresh run එකක් trigger කරනවා"
-          kill $BOT_PID 2>/dev/null || true
-          sleep 5
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          BOT_API_SERVER: ${{ secrets.BOT_API_SERVER }}
+          BOT_TOKEN: ${{ secrets.TG_TOKEN }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          LOCAL_API_URL: http://localhost:8081
+          BOT_API_SERVER: http://localhost:8081
           ASITHA_KEY: ${{ secrets.ASITHA_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FLARESOLVERR_URL: http://localhost:8191
-          LOCAL_API_URL: http://localhost:8081
 
-      - name: Re-run workflow (keep alive 24/7)
+      - name: Re-run (24/7)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sleep 60
-          gh api \
-            --method POST \
-            repos/${{ github.repository }}/actions/workflows/Bot.yml/dispatches \
-            -f ref=${{ github.ref_name }}
-          echo "✅ අලුත් Bot run එකක් trigger කළා — bot 24/7 alive"
+          sleep 30
+          gh api --method POST repos/${{ github.repository }}/actions/workflows/Bot.yml/dispatches -f ref=${{ github.ref_name }}
