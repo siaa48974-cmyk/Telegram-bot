@@ -3,13 +3,16 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+
 permissions:
   actions: write
   contents: read
+
 jobs:
   bot:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -18,39 +21,73 @@ jobs:
         env:
           LOG_LEVEL: info
           TZ: Asia/Colombo
+        options: >-
+          --health-cmd "curl -f http://localhost:8191/ || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
+
       - uses: denoland/setup-deno@v2
-        with: { deno-version: v2.x }
+        with:
+          deno-version: v2.x
 
       - name: Free disk + Fast Deps
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/graalvm /usr/local/share/powershell
           sudo docker image prune -af
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg libnss3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 libasound2t64 libxss1 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libcups2 libpango-1.0-0 libcairo2 libxshmfence1
-          sudo pip3 install -q yt-dlp -U
+          sudo pip3 install -q yt-dlp -U || pip3 install -q yt-dlp -U
+          ffmpeg -version
+          yt-dlp --version
           df -h /
 
-      - name: Start Local Bot API (2GB)
+      - name: Start Local Bot API (2GB) - FIXED
         run: |
-          docker run -d --name tg-api -p 8081:8081 -v /tmp/tg-data:/var/lib/telegram-bot-api aiogram/telegram-bot-api:latest --api-id=${{ secrets.API_ID }} --api-hash=${{ secrets.API_HASH }} --local --http-port=8081
-          for i in {1..30}; do if curl -sf http://localhost:8081/bot${{ secrets.TG_TOKEN }}/getMe > /dev/null; then echo "✅ Local API Ready - 2GB Enabled"; break; fi; sleep 2; done
+          docker rm -f tg-api 2>/dev/null || true
+          docker run -d --name tg-api -p 8081:8081 aiogram/telegram-bot-api:latest --local --http-port=8081 --api-id=${{ secrets.API_ID }} --api-hash=${{ secrets.API_HASH }}
+          echo "⏳ Local API Ready වෙනකම්..."
+          for i in {1..40}; do
+            if curl -sf http://127.0.0.1:8081/bot${{ secrets.TG_TOKEN }}/getMe > /dev/null 2>&1; then
+              echo "✅ Local API Ready - 2GB Enabled"
+              docker logs tg-api --tail 20
+              break
+            fi
+            echo "waiting $i/40"
+            sleep 3
+            if [ $i -eq 40 ]; then docker logs tg-api; fi
+          done
 
       - name: Install npm
         run: npm install
 
       - name: Verify FlareSolverr
         run: |
-          for i in {1..30}; do if curl -s http://localhost:8191/ | grep -q .; then echo "✅ FlareSolverr ready"; exit 0; fi; sleep 2; done
+          for i in {1..30}; do
+            if curl -s http://localhost:8191/ | grep -q .; then
+              echo "✅ FlareSolverr ready"
+              exit 0
+            fi
+            echo "⏳ FlareSolverr... ($i/30)"
+            sleep 2
+          done
+          echo "⚠️ FlareSolverr not ready - fallback"
 
       - name: Run bot (5h50m)
         run: |
           node index.js &
-          echo "🚀 Bot started via $LOCAL_API_URL"
+          BOT_PID=$!
+          echo "🚀 Bot started PID $BOT_PID via http://localhost:8081"
+          echo "Waiting 5h50m (21000s)..."
           sleep 21000
+          kill $BOT_PID 2>/dev/null || true
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           BOT_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -62,10 +99,11 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FLARESOLVERR_URL: http://localhost:8191
 
-      - name: Re-run (24/7)
+      - name: Re-run workflow (24/7)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sleep 30
-          gh api --method POST repos/${{ github.repository }}/actions/workflows/Bot.yml/dispatches -f ref=${{ github.ref_name }}
+          gh api --method POST repos/${{ github.repository }}/actions/workflows/Bot.yml/dispatches -f ref=${{ github.ref_name }} || gh api --method POST repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches -f ref=${{ github.ref_name }}
+          echo "✅ Re-triggered"
