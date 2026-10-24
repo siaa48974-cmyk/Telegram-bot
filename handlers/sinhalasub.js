@@ -72,13 +72,20 @@ async function search(query) {
     const title = ($(img).attr('alt') || $(el).attr('title') || $(el).text() || m[2].replace(/-/g, ' '))
       .replace(/\s+/g, ' ').trim();
     const isTv = /tvshows|\/tv\/|series|tvo|tva|tvc/.test(href);
-    out.push({ title: title || m[2], url: href + '/', image: $(img).attr('src') || $(img).attr('data-src') || null, type: isTv ? 'tv' : 'movie' });
+    out.push({
+      title: title || m[2],
+      url: href + '/',
+      image: $(img).attr('src') || $(img).attr('data-src') || null,
+      type: isTv ? 'tv' : 'movie',
+    });
   });
   return out.slice(0, 20);
 }
 
 /* ================= Quality/Episode extraction ================= */
-const FILE_HOST_RE = /pixeldrain\.com|drive\.google\.com|dotflix|dlserver|mega\.nz|mediafire\.com|1fichier\.com|rcloud|terabox|gofile\.io|streamtape|mp4upload|submit\.doors|sinhalasub\.lk\/go|direct/i;
+const FILE_HOST_RE = /pixeldrain|drive\.google\.com|filespayout|dotflix|dlserver|mega\.nz|mediafire|1fichier|rcloud|terabox|gofile|streamtape|mp4upload|doors|sinhalasub\.lk\/(go|dl)/i;
+
+const BAD_HOST_RE = /adserver|adstudio|gravatar|image\.tmdb|google-analytics|googletagmanager|fonts\.|wp-content|wp-login|wp-json|schema\.org|facebook\.com\/sharer|twitter\.com\/intent|whatsapp\.com\/channel|youtube\.com\/@|fb\.me|reddit\.com\/submit|tumblr\.com\/widgets|pinterest\.com\/pin|blogger\.com|vk\.com|mailto:|javascript:/i;
 
 function normQuality(text) {
   const m = String(text).match(/(1080|720|480)\s*p?/i);
@@ -91,9 +98,7 @@ function sectionLabel($, el) {
   // climb up to 6 ancestors looking for a heading that looks like an episode label
   let cur = $(el);
   for (let d = 0; d < 6 && cur.length; d++) {
-    const container = cur;
-    // check the container's own previous heading siblings
-    let prev = container.prev();
+    let prev = cur.prev();
     for (let i = 0; i < 6 && prev.length; i++) {
       if (/^(h[1-6]|strong|b)$/i.test(prev.get(0).tagName || '')) {
         const t = prev.text().trim();
@@ -101,50 +106,96 @@ function sectionLabel($, el) {
       }
       prev = prev.prev();
     }
-    cur = container.parent();
+    cur = cur.parent();
   }
   return null;
 }
+
+const isInternal = (u) => {
+  if (!/^https?:\/\//i.test(u)) return false;
+  try {
+    const h = new URL(u).hostname;
+    return /sinhalasub\.lk$/i.test(h);
+  } catch { return true; }
+};
 
 async function getQualityLinks(postUrl) {
   const { data: html } = await axios.get(postUrl, { headers, timeout: 25000 });
   const $ = cheerio.load(html);
   const links = [];
   const seen = new Set();
-  const sizeOf = (text) => (String(text).match(/\d+(?:\.\d+)?\s*(?:GB|MB)/i) || [''])[0].trim();
+  const sizeOf = (t) => (String(t).match(/\d+(?:\.\d+)?\s*(?:GB|MB)/i) || [''])[0].trim();
 
   const push = (href, qText, size, ep) => {
+    if (!href) return;
+    href = href.trim();
+    if (!href || href.startsWith('javascript') || href === '#') return;
+    if (href.startsWith('//')) href = 'https:' + href;
+    if (!/^https?:\/\//i.test(href)) {
+      // relative → absolute
+      try { href = new URL(href, postUrl).href; } catch { return; }
+    }
+    // url-encoded inner URL unwrap (?url=https%3A%2F%2Fpixeldrain...)
+    const enc = href.match(/(?:url|link|target|u|go)=(https?%3A%2F%2F[^&]+)/i);
+    if (enc) { try { href = decodeURIComponent(enc[1]); } catch {} }
+    if (BAD_HOST_RE.test(href)) return;
     const quality = normQuality(qText);
-    if (!quality || !href) return;
-    href = href.replace(/^.*?(https?:\/\/)/, '$1'); // strip proxy prefixes
+    if (!quality) return;
+    if (isInternal(href) && !/sinhalasub\.lk\/(go|dl)/i.test(href)) return;
     const key = href + '|' + quality + '|' + (ep || '');
     if (seen.has(key)) return;
     seen.add(key);
     links.push({ quality, size: size || '', url: href, episode: ep || null });
   };
 
-  // 1) table rows (site uses |Options|Quality|Size| tables)
+  /* --- 1) Tables: rows with quality + ANY external link (host check නැහැ) --- */
   $('table').each((_, tbl) => {
     $(tbl).find('tr').each((__, tr) => {
       const $tr = $(tr);
       const rowText = $tr.text();
-      $(tr).find('a[href]').each((___, a) => {
+      const ep = sectionLabel($, $tr);
+      let found = false;
+      $tr.find('a[href]').each((___, a) => {
         const href = $(a).attr('href') || '';
-        if (!FILE_HOST_RE.test(href)) return;
-        push(href, rowText, sizeOf(rowText), sectionLabel($, $tr));
+        if (isInternal(href)) return;
+        push(href, rowText, sizeOf(rowText), ep);
+        found = true;
       });
+      // onclick / data attributes fallback
+      $tr.find('[data-href],[data-link],[onclick]').each((___, el) => {
+        const d = $(el).attr('data-href') || $(el).attr('data-link')
+          || ($(el).attr('onclick') || '').match(/https?:\/\/[^'"]+/)?.[0];
+        if (d) push(d, rowText, sizeOf(rowText), ep);
+      });
+      // plain-text URL inside row
+      if (!found) {
+        const m = rowText.match(/https?:\/\/[^\s|<>"']+/);
+        if (m && !isInternal(m[0]) && !BAD_HOST_RE.test(m[0])) push(m[0], rowText, sizeOf(rowText), ep);
+      }
     });
   });
 
-  // 2) standalone anchors (button-style themes)
+  /* --- 2) Standalone anchors (button-style themes) --- */
   $('a[href]').each((_, a) => {
     const $a = $(a);
     const href = $a.attr('href') || '';
-    if (!FILE_HOST_RE.test(href)) return;
-    if (href.startsWith('#') || href.startsWith('javascript')) return;
+    if (isInternal(href)) return;
     const ctxText = $a.closest('tr,div,li,p').first().text() || $a.text();
+    const q = normQuality(ctxText);
+    if (!q && !FILE_HOST_RE.test(href)) return; // quality context නැත්නම් file-host link විතරක් ගන්න
     push(href, ctxText, sizeOf(ctxText), sectionLabel($, $a));
   });
+
+  /* --- 3) Raw HTML regex fallback (JS-rendered / escaped links) --- */
+  if (!links.length) {
+    const rawMatches = html.match(/https?:\\?\/\\?\/[^"'\\\s<>]{8,}/g) || [];
+    const cleaned = rawMatches.map(u => u.replace(/\\\//g, '/'));
+    const hosts = cleaned.filter(u => FILE_HOST_RE.test(u) && !BAD_HOST_RE.test(u));
+    [...new Set(hosts)].forEach(u => {
+      const quality = normQuality(u) || 'HD 720p';
+      links.push({ quality, size: '', url: u, episode: null });
+    });
+  }
 
   return links;
 }
@@ -159,14 +210,14 @@ async function resolveDirect(url) {
     return { directUrl: `https://pixeldrain.com/api/file/${px[1]}?download`, headers: { Referer: 'https://pixeldrain.com/' } };
   }
 
-  // Google Drive (with confirm-token flow for large files)
+  // Google Drive (confirm-token flow for large files)
   const gd = url.match(/drive\.google\.com\/(?:file\/d\/|uc\?(?:.*&)?id=|open\?id=)([A-Za-z0-9_-]{10,})/);
   if (gd) {
     const id = gd[1];
     let durl = `https://drive.google.com/uc?export=download&id=${id}`;
     try {
-      const r = await axios.get(durl, { headers, maxRedirects: 0, validateStatus: () => true, responseType: 'arraybuffer' });
-      const body = r.data && r.data.toString ? Buffer.from(r.data).toString() : '';
+      const r = await axios.get(durl, { headers, maxRedirects: 0, validateStatus: () => true, responseType: 'arraybuffer', timeout: 30000 });
+      const body = r.data ? Buffer.from(r.data).toString() : '';
       const ct = (r.headers['content-type'] || '');
       if (/text\/html/i.test(ct)) {
         const action = body.match(/action="([^"]+)"/)?.[1];
@@ -176,13 +227,38 @@ async function resolveDirect(url) {
           durl = action.includes('http') ? action : 'https://drive.google.com' + action;
           if (confirm) durl += `&confirm=${confirm}`;
           if (uuid) durl += `&uuid=${uuid}`;
-        } else if (body.match(/download_warning|confirm=/)) {
+        } else {
           const t = body.match(/confirm=([\w-]+)/)?.[1];
           if (t) durl += `&confirm=${t}`;
         }
       }
-    } catch { /* fall through with plain uc url */ }
+    } catch { /* plain uc url එකෙන් try කරනවා */ }
     return { directUrl: durl, headers: {} };
+  }
+
+  // FilesPayout — delay page එකෙන් direct link එක ගන්නවා
+  if (/filespayout\.com/i.test(url)) {
+    try {
+      const r = await axios.get(url, { headers, timeout: 30000, maxRedirects: 5, validateStatus: () => true });
+      const body = r.data || '';
+      // form action / direct file url එකක් තියෙනවද බලනවා
+      const action = body.match(/action="(https?:\/\/[^"]+)"[^>]*>\s*<button/i)?.[1]
+        || body.match(/https?:\/\/[^\s"'<>]+\/files?\/[^\s"'<>]+/i)?.[0]
+        || body.match(/location\.href\s*=\s*['"]([^'"]+)['"]/)?.[1];
+      if (action && !/filespayout\.com\/?$/i.test(action)) return { directUrl: action, headers: { Referer: url } };
+      // POST flow (token form) — common on filespayout
+      const token = body.match(/name="token"[^>]*value="([^"]+)"/)?.[1];
+      if (token) {
+        const p = await axios.post(url, `token=${token}`, {
+          headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded', Referer: url },
+          timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+        });
+        const m2 = (p.data || '').match(/https?:\/\/[^\s"'<>]+\.(?:mp4|mkv|avi|zip|rar)[^\s"'<>]*/i)
+          || (p.data || '').match(/action="(https?:\/\/[^"]+)"[^>]*>\s*<button/i)?.[1];
+        if (m2) return { directUrl: m2, headers: { Referer: url } };
+      }
+      return { directUrl: url, headers: {} }; // browser එකෙන් open කරන්න වෙන්න පුළුවන්
+    } catch { return { directUrl: url, headers: {} }; }
   }
 
   // Generic: follow redirect chain manually, return final URL
@@ -200,13 +276,12 @@ async function resolveDirect(url) {
     }
     const ct = res.headers['content-type'] || '';
     if (/text\/html/i.test(ct)) {
-      // HTML page — try to find a direct link inside
       const chunks = [];
       for await (const c of res.data) { chunks.push(c); if (chunks.length > 40) break; }
       const body = Buffer.concat(chunks).toString();
-      const cand = body.match(/https?:\/\/[^"'\\s]+(?:pixeldrain\.com\/api\/[^"'\\s]+|drive\.google\.com\/uc[^"'\\s]+|\.(?:mp4|mkv|avi)[^"'\\s]*)/i);
       res.data.destroy?.();
-      if (cand) { const inner = await resolveDirect(cand[0]); return inner; }
+      const cand = body.match(/https?:\/\/[^"'\\\s]+(?:pixeldrain\.com\/api\/[^"'\\\s]+|drive\.google\.com\/uc[^"'\\\s]+|\.(?:mp4|mkv|avi)[^\s"'\\]*)/i);
+      if (cand) return resolveDirect(cand[0]);
       throw new Error('HTML page, direct link හම්බුනේ නෑ');
     }
     res.data.destroy?.();
@@ -217,7 +292,10 @@ async function resolveDirect(url) {
 
 /* ================= Download / Convert / Upload ================= */
 async function downloadFile(url, dest, onProgress, extraHeaders = {}) {
-  const res = await axios.get(url, { headers: { ...headers, ...extraHeaders }, responseType: 'stream', timeout: 60000, maxRedirects: 5 });
+  const res = await axios.get(url, {
+    headers: { ...headers, ...extraHeaders },
+    responseType: 'stream', timeout: 60000, maxRedirects: 5,
+  });
   const total = parseInt(res.headers['content-length'] || '0', 10);
   let received = 0, lastPct = -5;
   await new Promise((resolve, reject) => {
@@ -242,7 +320,7 @@ async function convertToMp4(inPath) {
   const ff = (args) => new Promise((resolve) => execFile('ffmpeg', args, { timeout: 3 * 3600e3 }, (err) => resolve(!err)));
   if (await ff(['-y', '-i', inPath, '-c', 'copy', '-movflags', '+faststart', outPath])) return { outPath };
   if (await ff(['-y', '-i', inPath, '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac', outPath])) return { outPath };
-  return { outPath: inPath + '.mp4' }; // ffmpeg නැත්නම් raw එකම document විදිහට
+  return { outPath: inPath }; // ffmpeg නැත්නම් raw file එකම
 }
 
 async function uploadMp4(ctx, filePath, caption) {
@@ -310,6 +388,7 @@ async function handleSsCallback(ctx) {
 
       const hasEpisodes = links.some(l => l.episode);
       const kb = [];
+      let omdb = null;
       if (hasEpisodes) {
         const eps = [...new Set(links.map(l => l.episode))];
         eps.slice(0, 40).forEach((ep, ei) => {
@@ -317,7 +396,7 @@ async function handleSsCallback(ctx) {
         });
         if (eps.length > 40) kb.push([{ text: `⚠️ තව episodes ${eps.length - 40}ක් ඇති — site එකෙන් බලන්න`, callback_data: 'ss_none' }]);
       } else {
-        const omdb = await fetchOmdb(post.title);
+        omdb = await fetchOmdb(post.title);
         QUALITIES.forEach(q => {
           const l = links.find(x => x.quality === q);
           kb.push([{ text: l ? `🎬 ${q}${l.size ? ' • ' + l.size : ''}` : `${q} ❌`,
@@ -329,7 +408,7 @@ async function handleSsCallback(ctx) {
       const caption = `${post.type === 'tv' ? '📺' : '🎬'} <b>${post.title}</b>\n🔗 ${post.url}`;
       ctx.telegram.deleteMessage(status.chat.id, status.message_id).catch(() => {});
       const sendOpts = { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } };
-      const posterUrl = post.image || (omdb?.Poster !== 'N/A' ? omdb?.Poster : null);
+      const posterUrl = post.image || (omdb?.Poster && omdb.Poster !== 'N/A' ? omdb.Poster : null);
       if (posterUrl) {
         return ctx.replyWithPhoto({ url: posterUrl }, { caption: caption + (omdb && !hasEpisodes ? fmtOmdb(omdb) : ''), ...sendOpts })
           .catch(() => ctx.reply(caption, sendOpts));
@@ -365,9 +444,12 @@ async function handleSsCallback(ctx) {
 
   /* ---- Step 2a: Direct URLs ---- */
   if (quality === 'direct') {
+    // episode flow නම් episode links භාවිතා කරන්න
+    const epStore = cache.get(`ss_e_${ctx.chat.id}`)?.v;
+    if (epStore && epIdx !== null) links = epStore.links;
     if (!links?.length) return ctx.reply('⌛ Expired. නැවත /ss search කරන්න.');
     const msg = await ctx.reply('🔗 <b>Direct URLs</b> resolve කරනවා...', { parse_mode: 'HTML' });
-    let out = `🔗 <b>${post.title}</b>${cached2?.v?.ep ? ' — ' + cached2.v.ep : ''} — Direct URLs\n\n`;
+    let out = `🔗 <b>${post.title}</b>${epStore?.ep ? ' — ' + epStore.ep : ''} — Direct URLs\n\n`;
     let any = false;
     for (const l of links) {
       try {
@@ -383,7 +465,9 @@ async function handleSsCallback(ctx) {
 
   /* ---- Step 2b: quality → download → upload ---- */
   const qKey = quality === '1080' ? 'FHD 1080p' : quality === '720' ? 'HD 720p' : quality === '480' ? 'SD 480p' : null;
-  const chosen = (links || []).filter(l => l.quality === qKey);
+  const epStore = cache.get(`ss_e_${ctx.chat.id}`)?.v;
+  const pool = (epStore && epIdx !== null) ? epStore.links : links;
+  const chosen = (pool || []).filter(l => l.quality === qKey);
   if (!qKey || !chosen.length) return ctx.reply(`❌ ${qKey || quality} links නෑ. අනිත් quality එකක් තෝරන්න.`);
 
   const prog = await ctx.reply(`⬇️ <b>${qKey}</b> resolve + download... 0%`, { parse_mode: 'HTML' });
@@ -401,11 +485,11 @@ async function handleSsCallback(ctx) {
         `⬇️ Download: ${pct}%\n🎬 ${post.title}`, { parse_mode: 'HTML' }).catch(() => {});
     }, resolved.headers || {});
 
-    ctx.telegram.editMessageText(prog.chat.id, prog.message_id, '🎬 MP4 convert කරනවා...', { parse_mode: 'HTML' }).catch(() => {});
+    ctx.telegram.editMessageText(prog.chat.id, prog.message_id, '🎬 MP4 convert කරනවා... (mkv නම් ටිකක් යනවා)', { parse_mode: 'HTML' }).catch(() => {});
     const conv = await convertToMp4(tmp);
 
     ctx.telegram.editMessageText(prog.chat.id, prog.message_id, '⬆️ Telegram එකට upload... (ලොකු file නම් 10-30min)', { parse_mode: 'HTML' }).catch(() => {});
-    const label = (cached2?.v?.ep ? cached2.v.ep + ' • ' : '') + qKey;
+    const label = (epStore && epIdx !== null ? epStore.ep + ' • ' : '') + qKey;
     await uploadMp4(ctx, conv.outPath, `🎬 <b>${post.title}</b>\n🎥 <b>${label}</b> • MP4\n🔗 ${post.url}`);
 
     fs.unlink(tmp, () => {});
