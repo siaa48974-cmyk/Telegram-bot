@@ -3,9 +3,10 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const MAX_TG_SIZE = 48 * 1024 * 1024;
-const MAX_DURATION = 10 * 60;
+const MAX_TG_SIZE = 48 * 1024 * 1024; // GitHub Actions + public Bot API = 50MB
+const MAX_DURATION = 10 * 60; // runner limit නිසා 10 min වඩා දිග videos skip
 
+// YouTube bot-check bypass සඳහා common args
 const BASE_ARGS = [
   '--extractor-args', 'youtube:player_client=default,web_safari;formats=duplicate,missing_pot',
   '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
@@ -26,15 +27,26 @@ function ensureCookies() {
   return p;
 }
 
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function runYtdlp(args) {
   return new Promise((resolve, reject) => {
     execFile('yt-dlp', [...BASE_ARGS, ...args], { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
       (err, stdout, stderr) => {
         if (err) {
           const msg = stderr || err.message;
+
           if (/Sign in to confirm/.test(msg)) {
-            return reject(new Error('YouTube server IP එක block කරලා.'));
+            return reject(new Error(
+              'YouTub server IP එක block කරලා.' 
+            ));
           }
+
           return reject(new Error(msg.split('\n').filter(Boolean).slice(-3).join(' | ')));
         }
         resolve(stdout.trim());
@@ -55,17 +67,6 @@ function detectPlatform(url) {
 function extractUrl(text) {
   const m = String(text || '').match(/https?:\/\/[^\s]+/i);
   return m ? m[0] : null;
-}
-
-function cleanTitle(raw) {
-  let t = String(raw || 'video').trim();
-  if (/reactions/i.test(t) && t.includes('|')) {
-    const parts = t.split('|').map(s => s.trim()).filter(Boolean);
-    t = parts.slice(-2).join(' | ');
-  }
-  t = t.replace(/^\d+(\.\d+)?K?\s+reactions.*?\|\s*/i, '').trim();
-  if (t.length > 120) t = t.slice(0, 120) + '...';
-  return t || 'video';
 }
 
 async function getInfo(url) {
@@ -101,28 +102,14 @@ async function getInfo(url) {
     });
   }
 
-  let uploadDate = 'N/A';
-  if (info.upload_date && info.upload_date.length === 8) {
-    uploadDate = `${info.upload_date.slice(0,4)}-${info.upload_date.slice(4,6)}-${info.upload_date.slice(6,8)}`;
-  } else if (info.timestamp) {
-    uploadDate = new Date(info.timestamp * 1000).toISOString().slice(0,10);
-  }
-
   return {
-    title: cleanTitle(info.title),
+    title: info.title || 'video',
     duration: info.duration || 0,
-    uploader: info.uploader || info.channel || 'Unknown',
+    uploader: info.uploader || '',
     thumbnail: info.thumbnail || null,
     platform: detectPlatform(url),
     url,
-    qualities,
-    date: uploadDate,
-    views: info.view_count ? info.view_count.toLocaleString() : 'N/A',
-    likes: info.like_count ? info.like_count.toLocaleString() : 'N/A',
-    comments: info.comment_count ? info.comment_count.toLocaleString() : 'N/A',
-    shares: info.repost_count || info.share_count || 'N/A',
-    music: info.track || info.artist || 'Original Audio',
-    description: info.description ? info.description.slice(0, 400).trim() : 'N/A'
+    qualities
   };
 }
 
@@ -131,93 +118,101 @@ async function downloadVideo(url, height) {
   const format = height
     ? `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`
     : 'bestvideo+bestaudio/best';
+
   const args = [url, '-f', format, '--merge-output-format', 'mp4',
     '-o', path.join(dir, 'video.%(ext)s'), '--no-playlist'];
   const cookieFile = ensureCookies();
   if (cookieFile) args.push('--cookies', cookieFile);
+
   await runYtdlp(args);
+
   const file = fs.readdirSync(dir).find(f => f.startsWith('video.'));
   return file ? path.join(dir, file) : null;
 }
 
 async function downloadAudio(url) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yta-'));
+
   const args = [url, '-x', '--audio-format', 'mp3', '--audio-quality', '5',
     '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist'];
   const cookieFile = ensureCookies();
   if (cookieFile) args.push('--cookies', cookieFile);
+
   await runYtdlp(args);
+
   const file = fs.readdirSync(dir).find(f => f.startsWith('audio.'));
   return file ? path.join(dir, file) : null;
 }
 
 function cleanup(filePath) {
-  try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
+  try {
+    fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+  } catch {}
 }
 
 const pendingCache = new Map();
-function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+function createId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
 
 async function handleDlCommand(ctx) {
   const url = extractUrl(ctx.message?.text);
+
   if (!url) {
-    return ctx.reply('🔗 Video link එකක් එවන්න:\n\n• YouTube (10 min ≤)\n• Instagram\n• Facebook\n• TikTok\n\nඋදා: /dl https://youtu.be/xxxx');
+    return ctx.reply(
+      '🔗 Video link එකක් එවන්න:\n\n' +
+      '• YouTube (10 min ≤)\n• Instagram\n• Facebook\n• TikTok\n\n' +
+      'උදා: /dl https://youtu.be/xxxx'
+    );
   }
+
   const platform = detectPlatform(url);
   const status = await ctx.reply(`🔍 ${platform} link එක analyze කරනවා...`);
+
   try {
     const info = await getInfo(url);
+
     if (!info.qualities.length) {
       await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
       return ctx.reply('❌ 50MB limit ඇතුළට ගැලපෙන video format එකක් නැහැ.');
     }
+
     const id = createId();
     pendingCache.set(id, info);
     setTimeout(() => pendingCache.delete(id), 600000).unref?.();
+
     const buttons = info.qualities.slice(0, 6).map(q => ({
       text: `${q.height}p${q.filesize ? ` (${(q.filesize / 1048576).toFixed(0)}MB)` : ''}`,
       callback_data: `vid_${id}_${q.height}`
     }));
+
     const rows = [buttons.slice(0, 3)];
     if (buttons.length > 3) rows.push(buttons.slice(3));
     rows.push([{ text: '🎵 Audio (MP3)', callback_data: `aud_${id}` }]);
 
-    const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
     const caption =
-`◈=======================◈
-╭──────────────╮
-┃ 📝 \`𝗧𝗜𝗧𝗟𝗘\` : ${info.title}
-┃ 👤 \`𝐀𝐔𝐓𝐇𝐎𝐑\` : ${info.uploader}
-┃ ⌚ \`𝐃𝐔𝐑𝐀𝐓𝐈𝐎𝐍\` : ${durationStr}
-┃ 📅 \`𝐃𝐀𝐓𝐄\` : ${info.date}
-┃ 👁️ \`𝐕𝐈𝐄𝐖𝐒\` : ${info.views}
-┃ 👍 \`𝐑𝐄𝐀𝐂𝐓𝐒\` : ${info.likes}
-┃ 💬 \`𝐂𝐎𝐌𝐌𝐄𝐍𝐓𝐒\` : ${info.comments}
-┃ 🔄 \`𝐒𝐇𝐀𝐑𝐄𝐒\` : ${info.shares}
-┃ 🎵 \`𝐌𝐔𝐒𝐈𝐂\` : ${info.music}
-┃ 🔗 \`𝗨𝗥𝗟\` : ${info.url}
-╰──────────────╯
-
-📃 \`𝐃𝐄𝐒𝐂𝐑𝐈𝐏𝐓𝐈𝐎𝐍\` :
-${info.description}
-
-POWERED BY CINEMAX`;
+      `📥 <b>${esc(info.title)}</b>\n` +
+      `📱 Platform: ${info.platform}\n` +
+      (info.uploader ? `👤 ${esc(info.uploader)}\n` : '') +
+      (info.duration ? `⏱ ${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}\n` : '') +
+      `\n👇 Quality එකක් තෝරන්න`;
 
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-    
+
     if (info.thumbnail) {
       try {
-        await ctx.replyWithPhoto(info.thumbnail, {
-          caption,
+        return await ctx.replyWithPhoto(info.thumbnail, {
+          caption, parse_mode: 'HTML',
           reply_markup: { inline_keyboard: rows }
         });
-        return;
-      } catch (e) {
-        console.log('Thumb failed:', e.message);
-      }
+      } catch {}
     }
-    return ctx.reply(caption, { reply_markup: { inline_keyboard: rows } });
 
+    return ctx.reply(caption, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: rows }
+    });
   } catch (error) {
     console.error('DL info error:', error.message);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
@@ -228,41 +223,56 @@ POWERED BY CINEMAX`;
 async function handleDlCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
   await ctx.answerCbQuery().catch(() => {});
+
   const isAudio = data.startsWith('aud_');
   if (!isAudio && !data.startsWith('vid_')) return;
+
   const [, id, heightStr] = data.split('_');
   const info = pendingCache.get(id);
+
   if (!info) return ctx.reply('⌛ Request එක expired. නැවත link එක එවන්න.');
+
   pendingCache.delete(id);
   const height = isAudio ? null : Number(heightStr);
-  const status = await ctx.reply(isAudio ? '🎵 Audio download කරනවා...' : `⏳ ${height}p download කරනවා...`);
+
+  const status = await ctx.reply(
+    isAudio ? '🎵 Audio download කරනවා...' : `⏳ ${height}p download කරනවා...`
+  );
+
   let filePath = null;
+
   try {
-    filePath = isAudio ? await downloadAudio(info.url) : await downloadVideo(info.url, height);
+    filePath = isAudio
+      ? await downloadAudio(info.url)
+      : await downloadVideo(info.url, height);
+
     if (!filePath) throw new Error('Download failed');
+
     const size = fs.statSync(filePath).size;
+
     if (size > MAX_TG_SIZE) {
       cleanup(filePath);
       await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-      return ctx.reply(`⚠️ File එක 50MB limit එකට වඩා ලොකුයි (${(size / 1048576).toFixed(1)} MB).\nකුඩා quality එකක් try කරන්න.`);
+      return ctx.reply(
+        `⚠️ File එක 50MB limit එකට වඩා ලොකුයි (${(size / 1048576).toFixed(1)} MB).\n` +
+        `කුඩා quality එකක් try කරන්න.`
+      );
     }
-    const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
-    const finalCaption =
-`◈=======================◈
-╭──────────────╮
-┃ 📝 \`𝗧𝗜𝗧𝗟𝗘\` : ${info.title}
-┃ 👤 \`𝐀𝐔𝐓𝐇𝐎𝐑\` : ${info.uploader}
-┃ ⌚ \`𝐃𝐔𝐑𝐀𝐓𝐈𝐎𝐍\` : ${durationStr}
-┃ 📅 \`𝐃𝐀𝐓𝐄\` : ${info.date}
-┃ 👁️ \`𝐕𝐈𝐄𝐖𝐒\` : ${info.views}
-┃ 🔗 \`𝗨𝗥𝗟\` : ${info.url}
-╰──────────────╯
-POWERED BY CINEMAX`;
+
+    const caption = `✅ ${info.title}\nPOWERED BY CINEMAX`;
+
     if (isAudio) {
-      await ctx.replyWithAudio({ source: fs.createReadStream(filePath), filename: path.basename(filePath) }, { caption: finalCaption });
+      await ctx.replyWithAudio(
+        { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
+        { caption }
+      );
     } else {
-      await ctx.replyWithVideo({ source: fs.createReadStream(filePath), filename: path.basename(filePath) }, { caption: finalCaption, supports_streaming: true });
+      await ctx.replyWithVideo(
+        { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
+        { caption, supports_streaming: true }
+      );
     }
+
     cleanup(filePath);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
   } catch (error) {
@@ -280,4 +290,4 @@ function isSocialCommand(ctx) {
   return false;
 }
 
-module.exports = { handleDlCommand, handleDlCallback, isSocialCommand }
+module.exports = { handleDlCommand, handleDlCallback, isSocialCommand };
