@@ -3,10 +3,9 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const MAX_TG_SIZE = 48 * 1024 * 1024; // GitHub Actions + public Bot API = 50MB
-const MAX_DURATION = 10 * 60; // runner limit නිසා 10 min වඩා දිග videos skip
+const MAX_TG_SIZE = 48 * 1024 * 1024;
+const MAX_DURATION = 10 * 60;
 
-// YouTube bot-check bypass සඳහා common args
 const BASE_ARGS = [
   '--extractor-args', 'youtube:player_client=default,web_safari;formats=duplicate,missing_pot',
   '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
@@ -27,26 +26,15 @@ function ensureCookies() {
   return p;
 }
 
-function esc(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
 function runYtdlp(args) {
   return new Promise((resolve, reject) => {
     execFile('yt-dlp', [...BASE_ARGS, ...args], { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
       (err, stdout, stderr) => {
         if (err) {
           const msg = stderr || err.message;
-
           if (/Sign in to confirm/.test(msg)) {
-            return reject(new Error(
-              'YouTub server IP එක block කරලා.' 
-            ));
+            return reject(new Error('YouTube server IP එක block කරලා.'));
           }
-
           return reject(new Error(msg.split('\n').filter(Boolean).slice(-3).join(' | ')));
         }
         resolve(stdout.trim());
@@ -102,14 +90,28 @@ async function getInfo(url) {
     });
   }
 
+  let uploadDate = 'N/A';
+  if (info.upload_date && info.upload_date.length === 8) {
+    uploadDate = `${info.upload_date.slice(0,4)}-${info.upload_date.slice(4,6)}-${info.upload_date.slice(6,8)}`;
+  } else if (info.timestamp) {
+    uploadDate = new Date(info.timestamp * 1000).toISOString().slice(0,10);
+  }
+
   return {
     title: info.title || 'video',
     duration: info.duration || 0,
-    uploader: info.uploader || '',
+    uploader: info.uploader || info.channel || 'Unknown',
     thumbnail: info.thumbnail || null,
     platform: detectPlatform(url),
     url,
-    qualities
+    qualities,
+    date: uploadDate,
+    views: info.view_count ? info.view_count.toLocaleString() : 'N/A',
+    likes: info.like_count ? info.like_count.toLocaleString() : 'N/A',
+    comments: info.comment_count ? info.comment_count.toLocaleString() : 'N/A',
+    shares: info.repost_count || info.share_count || 'N/A',
+    music: info.track || info.artist || 'Original Audio',
+    description: info.description ? info.description.slice(0, 700) : 'N/A'
   };
 }
 
@@ -132,7 +134,6 @@ async function downloadVideo(url, height) {
 
 async function downloadAudio(url) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yta-'));
-
   const args = [url, '-x', '--audio-format', 'mp3', '--audio-quality', '5',
     '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist'];
   const cookieFile = ensureCookies();
@@ -191,26 +192,41 @@ async function handleDlCommand(ctx) {
     if (buttons.length > 3) rows.push(buttons.slice(3));
     rows.push([{ text: '🎵 Audio (MP3)', callback_data: `aud_${id}` }]);
 
+    const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
+
+    // ඔයා ඉල්ලපු Fancy Box එක
     const caption =
-      `📥 <b>${esc(info.title)}</b>\n` +
-      `📱 Platform: ${info.platform}\n` +
-      (info.uploader ? `👤 ${esc(info.uploader)}\n` : '') +
-      (info.duration ? `⏱ ${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}\n` : '') +
-      `\n👇 Quality එකක් තෝරන්න`;
+`◈=======================◈
+╭──────────────╮
+┃ 📝 \`𝗧𝗜𝗧𝗟𝗘\` : ${info.title}
+┃ 👤 \`𝐀𝐔𝐓𝐇𝐎𝐑\` : ${info.uploader}
+┃ ⌚ \`𝐃𝐔𝐑𝐀𝐓𝐈𝐎𝐍\` : ${durationStr}
+┃ 📅 \`𝐃𝐀𝐓𝐄\` : ${info.date}
+┃ 👁️ \`𝐕𝐈𝐄𝐖𝐒\` : ${info.views}
+┃ 👍 \`𝐑𝐄𝐀𝐂𝐓𝐒\` : ${info.likes}
+┃ 💬 \`𝐂𝐎𝐌𝐌𝐄𝐍𝐓𝐒\` : ${info.comments}
+┃ 🔄 \`𝐒𝐇𝐀𝐑𝐄𝐒\` : ${info.shares}
+┃ 🎵 \`𝐌𝐔𝐒𝐈𝐂\` : ${info.music}
+┃ 🔗 \`𝗨𝗥𝗟\` : ${info.url}
+╰──────────────╯
+
+📃 \`𝐃𝐄𝐒𝐂𝐑𝐈𝐏𝐓𝐈𝐎𝐍\` :
+${info.description}
+
+POWERED BY CINEMAX`;
 
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
 
     if (info.thumbnail) {
       try {
         return await ctx.replyWithPhoto(info.thumbnail, {
-          caption, parse_mode: 'HTML',
+          caption,
           reply_markup: { inline_keyboard: rows }
         });
       } catch {}
     }
 
     return ctx.reply(caption, {
-      parse_mode: 'HTML',
       reply_markup: { inline_keyboard: rows }
     });
   } catch (error) {
@@ -259,17 +275,28 @@ async function handleDlCallback(ctx) {
       );
     }
 
-    const caption = `✅ ${info.title}\nPOWERED BY CINEMAX`;
+    const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
+    const finalCaption =
+`◈=======================◈
+╭──────────────╮
+┃ 📝 \`𝗧𝗜𝗧𝗟𝗘\` : ${info.title}
+┃ 👤 \`𝐀𝐔𝐓𝐇𝐎𝐑\` : ${info.uploader}
+┃ ⌚ \`𝐃𝐔𝐑𝐀𝐓𝐈𝐎𝐍\` : ${durationStr}
+┃ 📅 \`𝐃𝐀𝐓𝐄\` : ${info.date}
+┃ 👁️ \`𝐕𝐈𝐄𝐖𝐒\` : ${info.views}
+┃ 🔗 \`𝗨𝗥𝗟\` : ${info.url}
+╰──────────────╯
+POWERED BY CINEMAX`;
 
     if (isAudio) {
       await ctx.replyWithAudio(
         { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
-        { caption }
+        { caption: finalCaption }
       );
     } else {
       await ctx.replyWithVideo(
         { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
-        { caption, supports_streaming: true }
+        { caption: finalCaption, supports_streaming: true }
       );
     }
 
@@ -290,4 +317,4 @@ function isSocialCommand(ctx) {
   return false;
 }
 
-module.exports = { handleDlCommand, handleDlCallback, isSocialCommand };
+module.exports = { handleDlCommand, handleDlCallback, isSocialCommand }
