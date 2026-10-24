@@ -57,6 +57,17 @@ function extractUrl(text) {
   return m ? m[0] : null;
 }
 
+function cleanTitle(raw) {
+  let t = String(raw || 'video').trim();
+  if (/reactions/i.test(t) && t.includes('|')) {
+    const parts = t.split('|').map(s => s.trim()).filter(Boolean);
+    t = parts.slice(-2).join(' | ');
+  }
+  t = t.replace(/^\d+(\.\d+)?K?\s+reactions.*?\|\s*/i, '').trim();
+  if (t.length > 120) t = t.slice(0, 120) + '...';
+  return t || 'video';
+}
+
 async function getInfo(url) {
   const args = [url, '--dump-json', '--no-playlist', '-R', '2'];
   const cookieFile = ensureCookies();
@@ -98,7 +109,7 @@ async function getInfo(url) {
   }
 
   return {
-    title: info.title || 'video',
+    title: cleanTitle(info.title),
     duration: info.duration || 0,
     uploader: info.uploader || info.channel || 'Unknown',
     thumbnail: info.thumbnail || null,
@@ -111,7 +122,7 @@ async function getInfo(url) {
     comments: info.comment_count ? info.comment_count.toLocaleString() : 'N/A',
     shares: info.repost_count || info.share_count || 'N/A',
     music: info.track || info.artist || 'Original Audio',
-    description: info.description ? info.description.slice(0, 700) : 'N/A'
+    description: info.description ? info.description.slice(0, 400).trim() : 'N/A'
   };
 }
 
@@ -120,14 +131,11 @@ async function downloadVideo(url, height) {
   const format = height
     ? `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`
     : 'bestvideo+bestaudio/best';
-
   const args = [url, '-f', format, '--merge-output-format', 'mp4',
     '-o', path.join(dir, 'video.%(ext)s'), '--no-playlist'];
   const cookieFile = ensureCookies();
   if (cookieFile) args.push('--cookies', cookieFile);
-
   await runYtdlp(args);
-
   const file = fs.readdirSync(dir).find(f => f.startsWith('video.'));
   return file ? path.join(dir, file) : null;
 }
@@ -138,63 +146,43 @@ async function downloadAudio(url) {
     '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist'];
   const cookieFile = ensureCookies();
   if (cookieFile) args.push('--cookies', cookieFile);
-
   await runYtdlp(args);
-
   const file = fs.readdirSync(dir).find(f => f.startsWith('audio.'));
   return file ? path.join(dir, file) : null;
 }
 
 function cleanup(filePath) {
-  try {
-    fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
-  } catch {}
+  try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
 }
 
 const pendingCache = new Map();
-
-function createId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-}
+function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
 async function handleDlCommand(ctx) {
   const url = extractUrl(ctx.message?.text);
-
   if (!url) {
-    return ctx.reply(
-      '🔗 Video link එකක් එවන්න:\n\n' +
-      '• YouTube (10 min ≤)\n• Instagram\n• Facebook\n• TikTok\n\n' +
-      'උදා: /dl https://youtu.be/xxxx'
-    );
+    return ctx.reply('🔗 Video link එකක් එවන්න:\n\n• YouTube (10 min ≤)\n• Instagram\n• Facebook\n• TikTok\n\nඋදා: /dl https://youtu.be/xxxx');
   }
-
   const platform = detectPlatform(url);
   const status = await ctx.reply(`🔍 ${platform} link එක analyze කරනවා...`);
-
   try {
     const info = await getInfo(url);
-
     if (!info.qualities.length) {
       await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
       return ctx.reply('❌ 50MB limit ඇතුළට ගැලපෙන video format එකක් නැහැ.');
     }
-
     const id = createId();
     pendingCache.set(id, info);
     setTimeout(() => pendingCache.delete(id), 600000).unref?.();
-
     const buttons = info.qualities.slice(0, 6).map(q => ({
       text: `${q.height}p${q.filesize ? ` (${(q.filesize / 1048576).toFixed(0)}MB)` : ''}`,
       callback_data: `vid_${id}_${q.height}`
     }));
-
     const rows = [buttons.slice(0, 3)];
     if (buttons.length > 3) rows.push(buttons.slice(3));
     rows.push([{ text: '🎵 Audio (MP3)', callback_data: `aud_${id}` }]);
 
     const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
-
-    // ඔයා ඉල්ලපු Fancy Box එක
     const caption =
 `◈=======================◈
 ╭──────────────╮
@@ -216,19 +204,20 @@ ${info.description}
 POWERED BY CINEMAX`;
 
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-
+    
     if (info.thumbnail) {
       try {
-        return await ctx.replyWithPhoto(info.thumbnail, {
+        await ctx.replyWithPhoto(info.thumbnail, {
           caption,
           reply_markup: { inline_keyboard: rows }
         });
-      } catch {}
+        return;
+      } catch (e) {
+        console.log('Thumb failed:', e.message);
+      }
     }
+    return ctx.reply(caption, { reply_markup: { inline_keyboard: rows } });
 
-    return ctx.reply(caption, {
-      reply_markup: { inline_keyboard: rows }
-    });
   } catch (error) {
     console.error('DL info error:', error.message);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
@@ -239,42 +228,24 @@ POWERED BY CINEMAX`;
 async function handleDlCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
   await ctx.answerCbQuery().catch(() => {});
-
   const isAudio = data.startsWith('aud_');
   if (!isAudio && !data.startsWith('vid_')) return;
-
   const [, id, heightStr] = data.split('_');
   const info = pendingCache.get(id);
-
   if (!info) return ctx.reply('⌛ Request එක expired. නැවත link එක එවන්න.');
-
   pendingCache.delete(id);
   const height = isAudio ? null : Number(heightStr);
-
-  const status = await ctx.reply(
-    isAudio ? '🎵 Audio download කරනවා...' : `⏳ ${height}p download කරනවා...`
-  );
-
+  const status = await ctx.reply(isAudio ? '🎵 Audio download කරනවා...' : `⏳ ${height}p download කරනවා...`);
   let filePath = null;
-
   try {
-    filePath = isAudio
-      ? await downloadAudio(info.url)
-      : await downloadVideo(info.url, height);
-
+    filePath = isAudio ? await downloadAudio(info.url) : await downloadVideo(info.url, height);
     if (!filePath) throw new Error('Download failed');
-
     const size = fs.statSync(filePath).size;
-
     if (size > MAX_TG_SIZE) {
       cleanup(filePath);
       await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-      return ctx.reply(
-        `⚠️ File එක 50MB limit එකට වඩා ලොකුයි (${(size / 1048576).toFixed(1)} MB).\n` +
-        `කුඩා quality එකක් try කරන්න.`
-      );
+      return ctx.reply(`⚠️ File එක 50MB limit එකට වඩා ලොකුයි (${(size / 1048576).toFixed(1)} MB).\nකුඩා quality එකක් try කරන්න.`);
     }
-
     const durationStr = info.duration ? `${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}` : 'N/A';
     const finalCaption =
 `◈=======================◈
@@ -287,19 +258,11 @@ async function handleDlCallback(ctx) {
 ┃ 🔗 \`𝗨𝗥𝗟\` : ${info.url}
 ╰──────────────╯
 POWERED BY CINEMAX`;
-
     if (isAudio) {
-      await ctx.replyWithAudio(
-        { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
-        { caption: finalCaption }
-      );
+      await ctx.replyWithAudio({ source: fs.createReadStream(filePath), filename: path.basename(filePath) }, { caption: finalCaption });
     } else {
-      await ctx.replyWithVideo(
-        { source: fs.createReadStream(filePath), filename: path.basename(filePath) },
-        { caption: finalCaption, supports_streaming: true }
-      );
+      await ctx.replyWithVideo({ source: fs.createReadStream(filePath), filename: path.basename(filePath) }, { caption: finalCaption, supports_streaming: true });
     }
-
     cleanup(filePath);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
   } catch (error) {
