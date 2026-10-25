@@ -1,5 +1,6 @@
-// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.3)
+// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.4)
 // Flow: /sub <name> → search → select → OMDb poster+details → auto subtitle upload
+// Cloudflare 403 → FlareSolverr fallback
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -8,6 +9,7 @@ const os = require('os');
 
 const BASE = 'https://www.baiscope.lk';
 const OMDB_KEY = process.env.OMDB_API_KEY || '';
+const FLARE_URL = (process.env.FLARESOLVERR_URL || '').replace(/\/$/, '');
 
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
@@ -20,11 +22,46 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ---------- Cloudflare-aware HTML fetch ----------
+// 1) axios normal GET → 403/429/503 ආවොත් 2) FlareSolverr fallback
+async function fetchHtml(url, extraHeaders = {}) {
+  try {
+    const res = await axios.get(url, {
+      headers: { ...HEADERS, ...extraHeaders },
+      timeout: 20000,
+      validateStatus: () => true,
+      maxRedirects: 5
+    });
+    if (res.status === 200 && !(res.headers['content-type'] || '').includes('text/html')) {
+      // HTML නෙවෙයි — caller එකට data එකම
+      return Buffer.from(res.data).toString('utf8');
+    }
+    if (res.status === 200) {
+      return Buffer.from(res.data).toString('utf8');
+    }
+    console.log(`[baiscope] axios status ${res.status} → FlareSolverr try`);
+  } catch (e) {
+    console.log('[baiscope] axios failed:', e.message, '→ FlareSolverr try');
+  }
+
+  // --- FlareSolverr fallback ---
+  if (!FLARE_URL) throw new Error(`403 (Cloudflare) — FlareSolverr URL නැහැ (FLARESOLVERR_URL env එක set කරන්න)`);
+  const { data } = await axios.post(`${FLARE_URL}/v1`, {
+    cmd: 'request.get',
+    url: url,
+    maxTimeout: 60000
+  }, { timeout: 70000 });
+
+  if (data.status !== 'ok' || !data.solution?.response) {
+    throw new Error(`FlareSolverr fail: ${data.message || 'unknown'}`);
+  }
+  console.log('[baiscope] FlareSolverr ✅ got page:', url);
+  return data.solution.response; // HTML
+}
+
 // ---------- Search ----------
 async function searchBaiscope(query) {
-  const { data: html } = await axios.get(`${BASE}/?s=${encodeURIComponent(query)}`, {
-    headers: HEADERS, timeout: 20000
-  });
+  const html = await fetchHtml(`${BASE}/?s=${encodeURIComponent(query)}`);
   const $ = cheerio.load(html);
   const results = [];
   const seen = new Set();
@@ -92,7 +129,7 @@ function omdbCaption(info, pageUrl) {
 
 // ---------- Subtitle link extraction ----------
 async function getSubtitleLink(pageUrl) {
-  const { data: html } = await axios.get(pageUrl, { headers: HEADERS, timeout: 20000 });
+  const html = await fetchHtml(pageUrl);
   const $ = cheerio.load(html);
 
   const title = ($('h1').first().text() || 'Subtitle').trim();
@@ -140,7 +177,7 @@ async function getSubtitleLink(pageUrl) {
   return { title, poster, links };
 }
 
-// ---------- Download subtitle file (intermediate page follow) ----------
+// ---------- Download subtitle file (binary via axios; HTML → intermediate follow) ----------
 function extractRealLinks(html) {
   const $ = cheerio.load(html);
   const found = [];
@@ -168,6 +205,7 @@ function extractRealLinks(html) {
 async function fetchSubtitle(url, referer, depth = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
 
+  // binary download එකට axios stream/arraybuffer (FlareSolverr binary files support නැහැ)
   let res;
   try {
     res = await axios.get(url, {
