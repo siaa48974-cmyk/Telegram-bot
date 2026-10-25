@@ -1,9 +1,5 @@
-// handlers/baiscope.js — v9.1 (FlareSolverr + strict download-link matching)
-// Baiscope Sinhala subtitle handler with Cloudflare bypass
-// Node.js >= 18
-// Dependencies: axios, cheerio
-// Requires: FlareSolverr running (docker service in workflow)
-
+// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.3)
+// Flow: /sub <name> → search → select → OMDb poster+details → auto subtitle upload
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -11,397 +7,231 @@ const path = require('path');
 const os = require('os');
 
 const BASE = 'https://www.baiscope.lk';
-
-/* ================= FlareSolverr config ================= */
-// FLARESOLVERR_URL env var — e.g. http://localhost:8191
-// FLARESOLVERR නැත්නම් direct axios fallback කරනවා (පරණ විදිහ)
-const FLARESOLVERR = process.env.FLARESOLVERR_URL || '';
-
-let flareSession = null;        // FlareSolverr session id
-let flareCookies = null;        // { name, value, domain }[] — cf_clearance etc.
-let flareCookieFetchedAt = 0;
-let flareLastUserAgent = null;  // cf_clearance UA-bound නිසා store කරනවා
-const COOKIE_TTL = 8 * 60 * 1000; // cf_clearance ~15min විතරයි; 8 min වලින් refresh
+const OMDB_KEY = process.env.OMDB_API_KEY || '';
 
 const HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9,si;q=0.8',
-  Referer: `${BASE}/`,
+  'Referer': BASE + '/'
 };
 
-const pending = new Map();
-const PENDING_TTL = 10 * 60 * 1000;
-const MAX_DOWNLOAD_BYTES = 45 * 1024 * 1024;
-
-/* ================= Helpers ================= */
-
-function esc(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function absoluteUrl(raw, baseUrl) {
-  try {
-    const url = new URL(String(raw || '').trim(), baseUrl);
-    if (!['http:', 'https:'].includes(url.protocol)) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
-}
-
-function createId() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function remember(id, value) {
-  pending.set(id, value);
-  const timer = setTimeout(() => pending.delete(id), PENDING_TTL);
-  timer.unref?.();
-}
-
-/* ================= Download link matching (STRICT) =================
-   baiscope.lk එකේ ඇත්ත download link pattern:
-   https://www.baiscope.lk/download/<post-slug>/<numeric-id>
-   නැත්නම් dl.baiscope.lk එකේම file link.
-   nav/category/footer links (/category/..., /?cat=...) කවදත් match වෙන්නේ නෑ! */
-
-function isRealSubtitleDownloadUrl(url) {
-  try {
-    const u = new URL(url);
-    if (!['www.baiscope.lk', 'baiscope.lk', 'dl.baiscope.lk'].includes(u.hostname)) return false;
-
-    if (u.hostname === 'dl.baiscope.lk') return true;
-
-    // /download/<slug>/<numeric-id>
-    if (/^\/download\/[^/]+\/\d+\/?$/i.test(u.pathname)) return true;
-
-    // අනිත් direct file links (කලාතුරකින්)
-    if (/\.(zip|rar|7z|srt|sub)$/i.test(u.pathname)) return true;
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-function isLikelyDownloadUrl(url) {
-  return isRealSubtitleDownloadUrl(url);
-}
-
-function decodeFilename(disposition, fallbackUrl) {
-  if (disposition) {
-    const utf8 = /filename\*=(?:UTF-8'')?([^;\r\n]+)/i.exec(disposition);
-    if (utf8?.[1]) {
-      try { return decodeURIComponent(utf8[1].replace(/"/g, '')); } catch {}
-    }
-    const plain = /filename="?([^";\r\n]+)"?/i.exec(disposition);
-    if (plain?.[1]) return plain[1].trim();
-  }
-  try {
-    const p = new URL(fallbackUrl).pathname;
-    return decodeURIComponent(p.split('/').filter(Boolean).pop() || 'subtitle');
-  } catch {
-    return 'subtitle';
-  }
-}
-
-function getFileExtension(name, contentType, data) {
-  const fromName = path.extname(String(name || '')).toLowerCase();
-  if (['.zip', '.rar', '.7z', '.srt', '.sub', '.ass'].includes(fromName)) return fromName;
-
-  const type = String(contentType || '').toLowerCase();
-  if (type.includes('zip')) return '.zip';
-  if (type.includes('rar')) return '.rar';
-  if (type.includes('x-subrip') || type.includes('srt')) return '.srt';
-  if (type.includes('plain') && data.length > 0) {
-    const head = data.slice(0, 2000).toString('utf8');
-    if (head.includes('-->')) return '.srt';
-    return '.srt';
-  }
-  // magic bytes
-  if (data.length > 4) {
-    if (data[0] === 0x50 && data[1] === 0x4b) return '.zip';
-    if (data[0] === 0x52 && data[1] === 0x61 && data[2] === 0x72) return '.rar';
-  }
-  return '.zip';
-}
-
-/* ================= FlareSolverr layer ================= */
-
-async function _flareRaw(url, { cmd = 'request.get', postData = null } = {}) {
-  if (!FLARESOLVERR) throw new Error('FLARESOLVERR_URL not configured');
-
-  // Reuse session; create if missing
-  if (!flareSession) {
-    try {
-      const res = await axios.post(`${FLARESOLVERR}/v1`, { cmd: 'sessions.create' }, { timeout: 60000 });
-      flareSession = res.data?.session || null;
-      console.log('[flare] session created:', flareSession);
-    } catch (e) {
-      console.error('[flare] session create failed:', e.message);
-      flareSession = null; // sessionless mode එකට
-    }
-  }
-
-  const body = {
-    cmd,
-    url,
-    maxTimeout: 60000,
-    session: flareSession || undefined,
-  };
-  if (postData) body.postData = postData;
-
-  const res = await axios.post(`${FLARESOLVERR}/v1`, body, { timeout: 90000 });
-
-  const sol = res.data?.solution;
-  if (!sol) throw new Error(`FLARE_ERROR: ${res.data?.message || 'no solution'}`);
-
-  // Refresh cookie + UA cache
-  if (Array.isArray(sol.cookies) && sol.cookies.length) {
-    flareCookies = sol.cookies;
-    flareCookieFetchedAt = Date.now();
-  }
-  if (sol.userAgent) flareLastUserAgent = sol.userAgent;
-
-  return sol;
-}
-
-// HTML page එකක් ගන්නවා — FlareSolverr තියෙනවා නම් ඒකෙන්, fail වුණොත් direct fallback
-async function fetchPage(url) {
-  if (FLARESOLVERR) {
-    try {
-      const sol = await _flareRaw(url);
-      const data = sol.response?.data ?? sol.response ?? '';
-      if (typeof data === 'string' && data.length > 0) return data;
-      throw new Error('FLARE_EMPTY_RESPONSE');
-    } catch (e) {
-      console.error('[baiscope] flare failed, trying direct:', e.message);
-    }
-  }
-
-  const { data, status } = await axios.get(url, {
-    headers: {
-      ...HEADERS,
-      ...(flareCookieHeader(url) ? { Cookie: flareCookieHeader(url) } : {}),
-      ...(flareLastUserAgent ? { 'User-Agent': flareLastUserAgent } : {}),
-    },
-    timeout: 30000,
-    responseType: 'text',
-    validateStatus: s => s < 500,
-  });
-  if (status === 403) throw new Error('SITE_BLOCKED_403');
-  if (status === 429) throw new Error('SITE_BLOCKED_429');
-  if (status === 503) throw new Error('SITE_BLOCKED_503');
-  if (typeof data === 'string' && /Just a moment\.\.\.|cf-challenge|Checking your browser/i.test(data)) {
-    throw new Error('SITE_BLOCKED_403');
-  }
-  return data;
-}
-
-function flareCookieHeader(targetUrl) {
-  if (!flareCookies || Date.now() - flareCookieFetchedAt > COOKIE_TTL) return null;
-  try {
-    const host = new URL(targetUrl).hostname;
-    const parts = flareCookies
-      .filter(c => host.endsWith(String(c.domain || '').replace(/^\./, '')))
-      .map(c => `${c.name}=${c.value}`);
-    return parts.length ? parts.join('; ') : null;
-  } catch {
-    return null;
-  }
-}
-
-/* ================= File download ================= */
-
-// Binary/file download — FlareSolverr binary pass කරන්නේ නෑ,
-// නමුත් එයා දෙන cookies (cf_clearance) + UA එක direct axios එකට දාලා download කරන්න පුළුවන්
-async function fetchSubtitle(url, referer, depth = 0, seen = new Set()) {
-  if (depth > 3) throw new Error('INTERMEDIATE_PAGE');
-  if (seen.has(url)) throw new Error('INTERMEDIATE_PAGE');
-  seen.add(url);
-
-  const headers = { ...HEADERS, Referer: referer || `${BASE}/` };
-  // cf_clearance UA-bound නිසා flare UA එකම යා යුතුයි
-  if (flareLastUserAgent) headers['User-Agent'] = flareLastUserAgent;
-  const cookie = flareCookieHeader(url);
-  if (cookie) headers.Cookie = cookie;
-
-  const response = await axios.get(url, {
-    headers,
-    timeout: 120000,
-    responseType: 'arraybuffer',
-    maxRedirects: 5,
-    validateStatus: s => s < 500,
-  });
-
-  const status = response.status;
-  if (status === 403 || status === 429 || status === 503) {
-    throw new Error(`SITE_BLOCKED_${status}`);
-  }
-  if (status >= 400) throw new Error(`HTTP_${status}`);
-
-  const contentType = String(response.headers['content-type'] || '');
-  let data = Buffer.from(response.data);
-
-  // HTML ආවොත් — intermediate page (ad page / redirect page) එකක්
-  if (contentType.includes('text/html')) {
-    const html = data.toString('utf8');
-    if (/Just a moment\.\.\.|cf-challenge/i.test(html)) throw new Error('SITE_BLOCKED_403');
-
-    const $ = cheerio.load(html);
-    // meta refresh / direct download link හොයනවා — STRICT matcher එකෙන් විතරයි
-    let next = null;
-    const metaRefresh = $('meta[http-equiv="refresh"]').attr('content');
-    if (metaRefresh) {
-      const m = /url=(.+)/i.exec(metaRefresh);
-      if (m) {
-        const candidate = absoluteUrl(m[1], url);
-        if (candidate && isRealSubtitleDownloadUrl(candidate)) next = candidate;
-      }
-    }
-    if (!next) {
-      $('a[href]').each((_, el) => {
-        if (next) return;
-        const abs = absoluteUrl($(el).attr('href') || '', url);
-        if (abs && isRealSubtitleDownloadUrl(abs)) next = abs;
-      });
-    }
-    if (!next) throw new Error('INTERMEDIATE_PAGE');
-    console.log('[baiscope] intermediate page → redirect to:', next);
-    return fetchSubtitle(next, url, depth + 1, seen);
-  }
-
-  if (data.length > MAX_DOWNLOAD_BYTES) throw new Error('FILE_TOO_LARGE');
-  if (data.length < 100) throw new Error('EMPTY_FILE');
-
-  const originalName = decodeFilename(response.headers['content-disposition'], url);
-  const extension = getFileExtension(originalName, contentType, data);
-  const safeName = `subtitle${extension}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
-  const filePath = path.join(dir, safeName);
-
-  try {
-    fs.writeFileSync(filePath, data);
-    return { filePath, dir, filename: safeName, size: data.length };
-  } catch (error) {
-    fs.rmSync(dir, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-async function downloadSubtitle(url, referer) {
-  return fetchSubtitle(url, referer, 0, new Set());
-}
-
-/* ================= Scraping ================= */
-
+// ---------- Search ----------
 async function searchBaiscope(query) {
-  const searchUrl = `${BASE}/?s=${encodeURIComponent(query)}`;
-  const html = await fetchPage(searchUrl);
+  const { data: html } = await axios.get(`${BASE}/?s=${encodeURIComponent(query)}`, {
+    headers: HEADERS, timeout: 20000
+  });
   const $ = cheerio.load(html);
   const results = [];
+  const seen = new Set();
 
-  // Search result cards — link එක post page එකට යනවා:
-  // https://www.baiscope.lk/movies/<slug>
-  $('article, .post, .item').each((_, el) => {
-    const linkEl = $(el).find('a[href]').first();
-    const href = linkEl.attr('href');
-    const title =
-      $(el).find('h2, .entry-title, .post-title').first().text().trim() ||
-      linkEl.text().trim();
-    const abs = absoluteUrl(href, BASE);
-    if (abs && title && abs.includes('baiscope.lk/movies')) {
-      results.push({ title, url: abs });
-    }
+  $('a[href*="/movies/"], a[href*="/tv/"]').each((i, el) => {
+    const href = $(el).attr('href') || '';
+    const text = ($(el).attr('title') || $(el).text() || '').trim();
+    if (!text || text.length < 5) return;
+    if (seen.has(href)) return;
+    seen.add(href);
+    results.push({ title: text, url: href.startsWith('http') ? href : BASE + href });
   });
 
-  // Fallback: plain heading links
-  if (!results.length) {
-    $('h2 a, h3 a, .entry-title a').each((_, el) => {
-      const href = $(el).attr('href');
-      const title = $(el).text().trim();
-      const abs = absoluteUrl(href, BASE);
-      if (abs && title && abs.includes('baiscope.lk/movies')) {
-        results.push({ title, url: abs });
-      }
-    });
-  }
-
-  // Dedupe + limit
-  const seen = new Set();
-  return results
-    .filter(r => {
-      if (seen.has(r.url)) return false;
-      seen.add(r.url);
-      return true;
-    })
-    .slice(0, 10);
+  return results.slice(0, 10);
 }
 
+// ---------- OMDb details ----------
+function parseTitleYear(rawTitle) {
+  const m = rawTitle.match(/^(.*?)\s*\((\d{4})\)/);
+  if (m) return { name: m[1].trim(), year: m[2] };
+  const name = rawTitle.replace(/Sinhala Subtitles?.*$/i, '')
+                       .replace(/\|.*$/, '')
+                       .replace(/\[.*?\]/g, '')
+                       .trim();
+  return { name, year: null };
+}
+
+async function getOmdbInfo(rawTitle) {
+  if (!OMDB_KEY) return null;
+  try {
+    const { name, year } = parseTitleYear(rawTitle);
+    if (!name) return null;
+
+    let url = `https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=${encodeURIComponent(name)}&plot=short`;
+    if (year) url += `&y=${year}`;
+    let { data } = await axios.get(url, { timeout: 15000 });
+
+    if (data.Response === 'False') {
+      url = `https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=${encodeURIComponent(name)}&plot=short&type=series`;
+      ({ data } = await axios.get(url, { timeout: 15000 }));
+    }
+
+    if (data.Response !== 'True') return null;
+    return data;
+  } catch (e) {
+    console.log('[baiscope] omdb failed:', e.message);
+    return null;
+  }
+}
+
+function omdbCaption(info, pageUrl) {
+  const lines = [
+    `🎬 <b>${esc(info.Title)}</b> (${esc(info.Year)})`,
+  ];
+  if (info.Rated && info.Rated !== 'N/A') lines.push(`🔖 ${esc(info.Rated)}`);
+  if (info.Genre && info.Genre !== 'N/A') lines.push(`🎭 ${esc(info.Genre)}`);
+  if (info.imdbRating && info.imdbRating !== 'N/A') lines.push(`⭐ IMDb: ${esc(info.imdbRating)}/10`);
+  if (info.Runtime && info.Runtime !== 'N/A') lines.push(`⏱ ${esc(info.Runtime)}`);
+  if (info.Director && info.Director !== 'N/A') lines.push(`🎥 Director: ${esc(info.Director)}`);
+  lines.push('');
+  lines.push(`📝 සිංහල උපසිරැසි — බයිස්කෝප්`);
+  lines.push(`🔗 ${esc(pageUrl)}`);
+  return lines.join('\n');
+}
+
+// ---------- Subtitle link extraction ----------
 async function getSubtitleLink(pageUrl) {
-  const html = await fetchPage(pageUrl);
+  const { data: html } = await axios.get(pageUrl, { headers: HEADERS, timeout: 20000 });
   const $ = cheerio.load(html);
 
-  const title =
-    $('h1.entry-title, h1.post-title, h1').first().text().trim() || 'Subtitle';
-  const poster = absoluteUrl(
-    $('img.wp-post-image, .post-thumb img, article img').first().attr('src'),
-    pageUrl
-  );
+  const title = ($('h1').first().text() || 'Subtitle').trim();
+  const poster = $('meta[property="og:image"]').attr('content') || null;
 
   const links = [];
   const seen = new Set();
 
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((i, el) => {
     const href = $(el).attr('href') || '';
-    const abs = absoluteUrl(href, pageUrl);
-    if (!abs || seen.has(abs)) return;
+    const lower = href.toLowerCase();
 
-    // STRICT: ඇත්ත subtitle download links (/download/<slug>/<id>) විතරක් ගන්නවා.
-    // nav / category / footer links skip! (v9.1 fix)
-    if (!isRealSubtitleDownloadUrl(abs)) return;
+    const isReal =
+      lower.includes('dl.baiscope.lk') ||
+      lower.includes('/download') ||
+      /\.(zip|rar|7z|srt)(\?|$)/.test(lower);
 
-    seen.add(abs);
-    const label = ($(el).text() || '').trim() || 'Download Subtitle';
-    links.push({ label, url: abs });
+    const isJunk =
+      lower.includes('advertise') ||
+      lower.includes('facebook') || lower.includes('twitter') ||
+      lower.includes('instagram') || lower.includes('t.me/') ||
+      lower.includes('whatsapp') || lower.includes('youtube') ||
+      lower.includes('mailto:') || lower.includes('javascript:') ||
+      lower.includes(BASE.toLowerCase() + '/category') ||
+      lower.includes(BASE.toLowerCase() + '/#') ||
+      lower.includes(BASE.toLowerCase() + '/movies') ||
+      lower.includes(BASE.toLowerCase() + '/tv');
+
+    if (isReal && !isJunk && !seen.has(href)) {
+      seen.add(href);
+      links.push({
+        url: href.startsWith('http') ? href : BASE + href,
+        label: ($(el).text() || 'Download').trim().slice(0, 40)
+      });
+    }
+  });
+
+  links.sort((a, b) => {
+    const score = u => u.url.toLowerCase().includes('dl.baiscope') ? 0 :
+      /\.(zip|rar|7z|srt)/.test(u.url.toLowerCase()) ? 1 :
+      u.url.toLowerCase().includes('/download') ? 2 : 3;
+    return score(a.url) - score(b.url);
   });
 
   return { title, poster, links };
 }
 
-/* ================= Telegram handlers ================= */
+// ---------- Download subtitle file (intermediate page follow) ----------
+function extractRealLinks(html) {
+  const $ = cheerio.load(html);
+  const found = [];
+  const seen = new Set();
 
-function browserFallback(url, error) {
-  let reason = 'Download එක ස්වයංක්‍රීයව ලබාගන්න බැරි වුණා.';
+  $('a[href]').each((i, el) => {
+    const href = $(el).attr('href') || '';
+    const lower = href.toLowerCase();
+    if (lower.includes('dl.baiscope') || /\.(zip|rar|7z|srt)(\?|$)/.test(lower)) {
+      if (!seen.has(href)) { seen.add(href); found.push(href.startsWith('http') ? href : BASE + href); }
+    }
+  });
 
-  if (/SITE_BLOCKED_(403|429|503)/.test(error.message)) {
-    reason = 'Baiscope server එක bot request එක block/rate-limit කළා.';
-  } else if (error.message === 'INTERMEDIATE_PAGE') {
-    reason = 'Download link එක අතරමැදි browser page එකක් හරහා යනවා.';
-  } else if (error.message === 'FILE_TOO_LARGE') {
-    reason = 'File එක Telegram upload limit එකට වඩා විශාලයි.';
-  } else if (error.message.startsWith('FLARE_ERROR')) {
-    reason = 'Cloudflare bypass (FlareSolverr) fail වුණා.';
-  }
+  $('form[action]').each((i, el) => {
+    const action = $(el).attr('action') || '';
+    if (action.startsWith('http')) found.push(action);
+  });
 
-  return `${reason}\n\n📥 Browser එකෙන් උත්සාහ කරන්න:\n${url}`;
+  const m = html.match(/https?:\/\/[^\s"'<>]*dl\.baiscope[^\s"'<>]*/i);
+  if (m && !seen.has(m[0])) found.push(m[0]);
+
+  return found;
 }
 
+async function fetchSubtitle(url, referer, depth = 0) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
+
+  let res;
+  try {
+    res = await axios.get(url, {
+      headers: { ...HEADERS, Referer: referer },
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      maxRedirects: 5,
+      validateStatus: () => true
+    });
+  } catch (e) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+
+  const status = res.status;
+  const ct = (res.headers['content-type'] || '').toLowerCase();
+  const data = res.data;
+
+  if (status === 403 || status === 429 || status === 503) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error('CLOUDFLARE_BLOCKED (' + status + ')');
+  }
+
+  if (ct.includes('text/html')) {
+    if (depth < 2) {
+      const html = Buffer.from(data).toString('utf8');
+      const candidates = extractRealLinks(html);
+      const next = candidates.find(u => u !== url);
+      if (next) {
+        console.log('[baiscope] intermediate page → following:', next);
+        fs.rmSync(dir, { recursive: true, force: true });
+        return fetchSubtitle(next, url, depth + 1);
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error('INTERMEDIATE_PAGE');
+  }
+
+  const cd = res.headers['content-disposition'] || '';
+  const filename = (cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i)?.[1]
+    || url.split('/').pop().split('?')[0] || 'subtitle').replace(/["']/g, '');
+
+  const ext = path.extname(filename) || '.zip';
+  const filePath = path.join(dir, `subtitle${ext}`);
+  fs.writeFileSync(filePath, data);
+  return filePath;
+}
+
+async function downloadSubtitle(url, referer) {
+  return fetchSubtitle(url, referer, 0);
+}
+
+// ---------- State ----------
+const pending = new Map();
+function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+// ---------- /sub command ----------
 async function cmdSub(ctx) {
   const query = (ctx.message?.text || '').replace(/^\/sub\s*/i, '').trim();
-
   if (!query) {
-    return ctx.reply('🎬 Usage: /sub <movie name>\nඋදා: /sub interstellar');
+    return ctx.reply('🎬 Usage: `/sub <movie name>`\nඋදා: /sub interstellar', { parse_mode: 'Markdown' });
   }
 
   const status = await ctx.reply(`🔍 බයිස්කෝප් එකේ "${esc(query)}" search කරනවා...`);
-
   try {
     const results = await searchBaiscope(query);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
@@ -411,121 +241,149 @@ async function cmdSub(ctx) {
     }
 
     const id = createId();
-    remember(id, results);
+    pending.set(id, results);
+    setTimeout(() => pending.delete(id), 600000).unref?.();
 
     const keyboard = {
-      inline_keyboard: results.map((result, index) => [{
-        text: result.title.slice(0, 60),
-        callback_data: `bsc_${id}_${index}`,
-      }]),
+      inline_keyboard: results.map((r, i) => [{
+        text: r.title.slice(0, 60),
+        callback_data: `bsc_${id}_${i}`
+      }])
     };
-
-    return ctx.reply('👇 Movie/Series එකක් තෝරන්න:', { reply_markup: keyboard });
-  } catch (error) {
+    return ctx.reply('👇 Movie/Series එකක් තෝරන්න — subtitle එක auto upload වෙනවා:', { reply_markup: keyboard });
+  } catch (e) {
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-    console.error('[baiscope] search failed:', error.message);
-    return ctx.reply('❌ Search එක අසාර්ථකයි. ටිකකින් නැවත උත්සාහ කරන්න.');
+    console.log('[baiscope] search failed:', e.message);
+    return ctx.reply(`❌ Search error: ${e.message}`);
   }
 }
 
+// ---------- Callbacks ----------
 async function handleSubCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
-  await ctx.answerCbQuery().catch(() => {});
+  console.log('[baiscope] callback:', data);
+  await ctx.answerCbQuery().catch(e => console.log('[baiscope] answerCb fail:', e.message));
 
   try {
-    if (data.startsWith('bscd_')) {
-      const [, id, indexText] = data.split('_');
-      const cached = pending.get(id);
-
-      if (!cached) {
-        return ctx.reply('⌛ Link එක expire වෙලා. නැවත /sub කරන්න.');
-      }
-
-      const link = cached.links?.[Number(indexText)];
-      if (!link) return ctx.reply('❌ Download link එක හමු වුණේ නැහැ.');
-
-      const status = await ctx.reply('⏳ Subtitle download කරනවා...');
-      let downloaded;
-
-      try {
-        downloaded = await downloadSubtitle(link.url, cached.pageUrl);
-
-        await ctx.replyWithDocument(
-          { source: fs.createReadStream(downloaded.filePath), filename: downloaded.filename },
-          { caption: `✅ ${esc(cached.title)}\n📝 Sinhala Subtitle` }
-        );
-      } catch (error) {
-        console.error('[baiscope] download/upload failed:', error.message);
-        await ctx.reply(browserFallback(link.url, error));
-      } finally {
-        if (downloaded?.dir) {
-          fs.rmSync(downloaded.dir, { recursive: true, force: true });
-        }
-        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-      }
-
-      return;
-    }
-
+    // ----- Movie select (bsc_) → OMDb info → auto download → upload -----
     if (data.startsWith('bsc_')) {
-      const [, id, indexText] = data.split('_');
+      const [, id, idx] = data.split('_');
       const results = pending.get(id);
+      if (!results) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
 
-      if (!results) {
-        return ctx.reply('⌛ Search result expire වෙලා. නැවත /sub කරන්න.');
-      }
-
-      const picked = results[Number(indexText)];
+      const picked = results[Number(idx)];
       if (!picked) return ctx.reply('❌ Result එක හමු වුණේ නැහැ.');
 
       const status = await ctx.reply('🔍 Subtitle link එක හොයනවා...');
-
       try {
         const info = await getSubtitleLink(picked.url);
         await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
 
-        const caption =
-          `🎬 <b>${esc(info.title)}</b>\n📝 සිංහල උපසිරැසි\n🔗 ${esc(picked.url)}`;
+        if (!info.links.length) {
+          console.log('[baiscope] no links found for', picked.url);
+          return ctx.reply('❌ Subtitle link auto-detect කරන්න බැහැ.\n\n📥 Browser එකෙන් ගන්න:\n' + picked.url);
+        }
+
+        // --- OMDb poster + details ---
+        const omdb = await getOmdbInfo(picked.title);
+        const caption = omdb
+          ? omdbCaption(omdb, picked.url)
+          : `🎬 <b>${esc(info.title)}</b>\n📝 සිංහල උපසිරැසි\n🔗 ${esc(picked.url)}`;
+        const posterUrl = (omdb && omdb.Poster && omdb.Poster !== 'N/A') ? omdb.Poster : info.poster;
 
         try {
-          if (info.poster) {
-            await ctx.replyWithPhoto(info.poster, { caption, parse_mode: 'HTML' });
-          } else {
-            await ctx.reply(caption, { parse_mode: 'HTML' });
-          }
+          if (posterUrl) await ctx.replyWithPhoto(posterUrl, { caption, parse_mode: 'HTML' });
+          else await ctx.reply(caption, { parse_mode: 'HTML' });
         } catch {
           await ctx.reply(caption, { parse_mode: 'HTML' });
         }
 
-        if (!info.links.length) {
-          return ctx.reply(
-            `❌ Subtitle download link එක auto-detect කරන්න බැහැ.\n\n📥 Browser එකෙන් බලන්න:\n${picked.url}`
-          );
+        // --- Auto download: පළවෙනි (best-scored) link එක ---
+        const dlStatus = await ctx.reply(`⏳ Subtitle download කරනවා...\n📥 ${info.links[0].url}`);
+
+        let filePath = null;
+        try {
+          filePath = await downloadSubtitle(info.links[0].url, picked.url);
+        } catch (e) {
+          console.log('[baiscope] auto download failed:', e.message);
+          await ctx.telegram.deleteMessage(ctx.chat.id, dlStatus.message_id).catch(() => {});
+
+          const linkId = createId();
+          pending.set(linkId, { ...info, pageUrl: picked.url });
+          setTimeout(() => pending.delete(linkId), 600000).unref?.();
+
+          const keyboard = {
+            inline_keyboard: info.links.slice(0, 5).map((l, i) => [{
+              text: (l.label || 'Download').slice(0, 40),
+              callback_data: `bscd_${linkId}_${i}`
+            }])
+          };
+          return ctx.reply(`⚠️ Auto download fail (${e.message}) — link එකක් අතින් තෝරන්න:`, { reply_markup: keyboard });
         }
 
-        const linkId = createId();
-        remember(linkId, { ...info, pageUrl: picked.url });
+        try {
+          console.log('[baiscope] uploading file:', filePath);
+          await ctx.replyWithDocument(
+            { source: fs.createReadStream(filePath), filename: `${info.title.replace(/[^\w\s()-]/g, '').slice(0, 50)}${path.extname(filePath) || '.zip'}` },
+            { caption: `✅ ${esc(info.title)}\nසිංහල උපසිරැසි — POWERED BY CINEMAX` }
+          );
+        } catch (e) {
+          console.log('[baiscope] upload failed:', e.message);
+          return ctx.reply(`⚠️ Upload fail: ${e.message}\n\n📥 Link:\n${info.links[0].url}`);
+        } finally {
+          try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
+          await ctx.telegram.deleteMessage(ctx.chat.id, dlStatus.message_id).catch(() => {});
+        }
+        return;
 
-        const keyboard = {
-          inline_keyboard: info.links.slice(0, 5).map((item, index) => [{
-            text: (item.label || 'Download Subtitle').slice(0, 40),
-            callback_data: `bscd_${linkId}_${index}`,
-          }]),
-        };
-
-        return ctx.reply(`📥 ${info.links.length} download link(s) හමු වුණා — එකක් තෝරන්න:`, {
-          reply_markup: keyboard,
-        });
-      } catch (error) {
+      } catch (e) {
         await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-        console.error('[baiscope] link scrape failed:', error.message);
-        return ctx.reply(`❌ Subtitle details ලබාගන්න බැරි වුණා.\n${picked.url}`);
+        console.log('[baiscope] link scrape failed:', e.message);
+        return ctx.reply(`❌ ${e.message}`);
       }
     }
-  } catch (error) {
-    console.error('[baiscope] callback crashed:', error);
+
+    // ----- Manual link select (bscd_) — auto fail fallback එකට -----
+    if (data.startsWith('bscd_')) {
+      const [, id, idx] = data.split('_');
+      const cached = pending.get(id);
+      if (!cached) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
+
+      const dl = cached.links[Number(idx)];
+      if (!dl) return ctx.reply('❌ Link එක හමු වුණේ නැහැ.');
+
+      console.log('[baiscope] downloading:', dl.url);
+
+      const status = await ctx.reply('⏳ Subtitle download කරනවා...');
+
+      let filePath = null;
+      try {
+        filePath = await downloadSubtitle(dl.url, cached.pageUrl);
+      } catch (e) {
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+        console.log('[baiscope] download failed:', e.message);
+        return ctx.reply(`⚠️ Direct download fail වුණා.\n\n📥 Browser එකෙන් ගන්න:\n${dl.url}`);
+      }
+
+      try {
+        console.log('[baiscope] uploading file:', filePath);
+        await ctx.replyWithDocument(
+          { source: fs.createReadStream(filePath) },
+          { caption: `✅ ${cached.title}\nPOWERED BY CINEMAX` }
+        );
+      } catch (e) {
+        console.log('[baiscope] upload failed:', e.message);
+        return ctx.reply(`⚠️ Upload fail: ${e.message}\n\n📥 Link:\n${dl.url}`);
+      } finally {
+        try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+      }
+      return;
+    }
+  } catch (e) {
+    console.error('[baiscope] handler crash:', e);
     try {
-      return await ctx.reply('⚠️ මේ ක්‍රියාව සම්පූර්ණ කරන්න බැරි වුණා. නැවත උත්සාහ කරන්න.');
+      return await ctx.reply(`⚠️ Error: ${e.message}`);
     } catch {}
   }
 }
