@@ -18,6 +18,7 @@ const ytm = safeRequire('./handlers/ytm') || {};
 const ai = safeRequire('./handlers/ai') || {};
 const ai2 = safeRequire('./handlers/ai2');
 const siaa_pro = safeRequire('./handlers/siaa_pro');
+const hack = safeRequire('./handlers/hack');
 
 const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => ctx.reply('🤖 Bot Alive ✅'));
 const { handleText, handleCallback } = downloader;
@@ -32,6 +33,7 @@ const { cmdSong, handleYtmCallback } = ytm;
 const { cmdAi, cmdImg, cmdReset } = ai;
 const cmdAi2 = ai2?.cmdAi2 || ((ctx) => ctx.reply('⚠️ ai2.js නෑ'));
 const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js නෑ'));
+const hackHandler = hack?.hackHandler || ((ctx) => ctx.reply('⚠️ hack.js නෑ'));
 
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
@@ -47,6 +49,7 @@ const bot = new Telegraf(BOT_TOKEN, {
 
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
+bot.command('hack', (ctx) => hackHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand && handleDlCommand(ctx));
 bot.command('yt', (ctx) => cmdYt && cmdYt(ctx));
 bot.command('song', (ctx) => cmdSong && cmdSong(ctx));
