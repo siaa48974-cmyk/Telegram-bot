@@ -1,4 +1,4 @@
-// handlers/yt.js — YouTube search + download (yt-dlp)
+// handlers/yt.js — YouTube search + download (yt-dlp) — FIXED
 const { execFile } = require('child_process');
 const os = require('os');
 const path = require('path');
@@ -7,18 +7,26 @@ const fs = require('fs');
 const MAX_TG_SIZE = process.env.LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
 const MAX_DURATION = 10 * 60;
 
+// ✅ FIX 1: valid extractor args (පරණ එකේ `;formats=duplicate,missing_pot` invalid ය)
+// web_safari client එකෙන් bot-check අඩුවෙනවා, tv_embedded fallback එකක් විදිහට
 const BASE_ARGS = [
-  '--extractor-args', 'youtube:player_client=default,web_safari;formats=duplicate,missing_pot',
+  '--extractor-args', 'youtube:player_client=web_safari,tv_embedded',
   '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
   '--force-ipv4', '--retries', '3', '--socket-timeout', '20', '--no-warnings'
 ];
 
 const YT_COOKIES_B64 = process.env.YT_COOKIES_B64 || '';
 
+// ✅ FIX 3: cookies file cache — env වෙනස් උනාම නැවත ලියනවා
+let cookieHash = '';
 function ensureCookies() {
   if (!YT_COOKIES_B64) return '';
+  const newHash = Buffer.from(YT_COOKIES_B64, 'base64').length + ':' + YT_COOKIES_B64.slice(-16);
   const p = '/tmp/yt_cookies.txt';
-  if (!fs.existsSync(p)) fs.writeFileSync(p, Buffer.from(YT_COOKIES_B64, 'base64'));
+  if (!fs.existsSync(p) || cookieHash !== newHash) {
+    fs.writeFileSync(p, Buffer.from(YT_COOKIES_B64, 'base64'));
+    cookieHash = newHash;
+  }
   return p;
 }
 
@@ -28,12 +36,21 @@ function esc(s) {
 
 function runYtdlp(args) {
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', [...BASE_ARGS, ...args], { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
+    const cf = ensureCookies();
+    const finalArgs = [...BASE_ARGS, ...(cf ? ['--cookies', cf] : []), ...args];
+    execFile('yt-dlp', finalArgs, { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
       (err, stdout, stderr) => {
         if (err) {
           const msg = stderr || err.message;
-          if (/Sign in to confirm/.test(msg)) {
-            return reject(new Error('YouTube IP block කරලා — YT_COOKIES_B64 secret එක දාන්න.'));
+          if (/Sign in to confirm|not a bot|This content isn't available/i.test(msg)) {
+            return reject(new Error(
+              'YouTube මේ IP එක block කරලා. Browser එකකින් cookies.txt export කරලා ' +
+              'base64 encode කරලා YT_COOKIES_B64 secret එකට දාන්න. ' +
+              '(yt-dlp version එකත් update කරන්න: pip install -U yt-dlp)'
+            ));
+          }
+          if (/ENOENT|spawn/i.test(msg)) {
+            return reject(new Error('yt-dlp install වෙලා නෑ. මේ විදිහට install කරන්න: pip install -U yt-dlp'));
           }
           return reject(new Error(msg.slice(-400)));
         }
@@ -92,8 +109,6 @@ async function downloadVideo(url, height) {
     : 'bestvideo+bestaudio/best';
   const args = [url, '-f', format, '--merge-output-format', 'mp4',
     '-o', path.join(dir, 'video.%(ext)s'), '--no-playlist'];
-  const cf = ensureCookies();
-  if (cf) args.push('--cookies', cf);
   await runYtdlp(args);
   const file = fs.readdirSync(dir).find(f => f.startsWith('video.'));
   return file ? path.join(dir, file) : null;
@@ -103,8 +118,6 @@ async function downloadAudio(url) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yta-'));
   const args = [url, '-x', '--audio-format', 'mp3', '--audio-quality', '5',
     '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist'];
-  const cf = ensureCookies();
-  if (cf) args.push('--cookies', cf);
   await runYtdlp(args);
   const file = fs.readdirSync(dir).find(f => f.startsWith('audio.'));
   return file ? path.join(dir, file) : null;
