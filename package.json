@@ -1,7 +1,7 @@
 {
   "name": "telegram-bot",
   "version": "1.0.0",
-  "description": "SiAA Pro Telegram Bot - AI (photo/voice) + downloaders",
+  "description": "SiAA Pro Telegram Bot - AI (photo/voice) + downloaders + WhatsApp",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -16,6 +16,8 @@
     "axios": "^1.7.9",
     "cheerio": "^1.0.0",
     "puppeteer": "^24.0.0",
-    "form-data": "^4.0.0"
+    "form-data": "^4.0.0",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^9.4.0"
   }
 }
