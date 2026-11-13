@@ -19,6 +19,7 @@ const ai = safeRequire('./handlers/ai') || {};
 const ai2 = safeRequire('./handlers/ai2');
 const siaa_pro = safeRequire('./handlers/siaa_pro');
 const hack = safeRequire('./handlers/hack');
+const wa = safeRequire('./handlers/whatsapp');
 
 const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => ctx.reply('🤖 Bot Alive ✅'));
 const { handleText, handleCallback } = downloader;
@@ -34,6 +35,8 @@ const { cmdAi, cmdImg, cmdReset } = ai;
 const cmdAi2 = ai2?.cmdAi2 || ((ctx) => ctx.reply('⚠️ ai2.js නෑ'));
 const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js නෑ'));
 const hackHandler = hack?.hackHandler || ((ctx) => ctx.reply('⚠️ hack.js නෑ'));
+const cmdPair = wa?.cmdPair || ((ctx) => ctx.reply('⚠️ whatsapp.js නෑ'));
+const cmdUnpair = wa?.cmdUnpair || ((ctx) => ctx.reply('⚠️ whatsapp.js නෑ'));
 
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
@@ -65,6 +68,8 @@ bot.command('pro', (ctx) => cmdPro(ctx));
 bot.command('siaapro', (ctx) => cmdPro(ctx));
 bot.command('img', (ctx) => cmdImg && cmdImg(ctx));
 bot.command('reset', (ctx) => cmdReset && cmdReset(ctx));
+bot.command('pair', (ctx) => cmdPair(ctx));
+bot.command('unpair', (ctx) => cmdUnpair(ctx));
 
 bot.on('photo', (ctx) => { if(cacheMessage) cacheMessage(ctx); const cap=ctx.message.caption||''; if(cap.startsWith('/pro')||cap.startsWith('/siaapro')) return cmdPro(ctx); });
 bot.on('voice', (ctx) => { if(cacheMessage) cacheMessage(ctx); return cmdPro(ctx); });
