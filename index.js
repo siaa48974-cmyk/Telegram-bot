@@ -20,6 +20,7 @@ const ai2 = safeRequire('./handlers/ai2');
 const siaa_pro = safeRequire('./handlers/siaa_pro');
 const hack = safeRequire('./handlers/hack');
 const wa = safeRequire('./handlers/whatsapp');
+const results = safeRequire('./handlers/results') || {};
 
 const aliveHandler = aliveMod?.aliveHandler || (async (ctx) => ctx.reply('🤖 Bot Alive ✅'));
 const { handleText, handleCallback } = downloader;
@@ -37,6 +38,8 @@ const cmdPro = siaa_pro?.cmdPro || ((ctx) => ctx.reply('⚠️ siaa_pro.js න�
 const hackHandler = hack?.hackHandler || ((ctx) => ctx.reply('⚠️ hack.js නෑ'));
 const cmdPair = wa?.cmdPair || ((ctx) => ctx.reply('⚠️ whatsapp.js නෑ'));
 const cmdUnpair = wa?.cmdUnpair || ((ctx) => ctx.reply('⚠️ whatsapp.js නෑ'));
+const cmdAl = results?.cmdAl || ((ctx) => ctx.reply('⚠️ results.js නෑ'));
+const cmdOl = results?.cmdOl || ((ctx) => ctx.reply('⚠️ results.js නෑ'));
 
 const BOT_TOKEN = process.env.TG_TOKEN || process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('TG_TOKEN not set');
@@ -71,9 +74,39 @@ bot.command('reset', (ctx) => cmdReset && cmdReset(ctx));
 bot.command('pair', (ctx) => cmdPair(ctx));
 bot.command('unpair', (ctx) => cmdUnpair(ctx));
 
+// === EXAM RESULTS (doenets.lk) ===
+bot.command('al', cmdAl);
+bot.command('ol', cmdOl);
+bot.command('exam', async (ctx) => ctx.reply(
+  '🎓 Exam Results\n\n' +
+  '• /al — G.C.E. A/L result (index + NIC)\n' +
+  '• /ol — G.C.E. O/L result (index + NIC)\n' +
+  '• /cancel — session එක cancel\n\n' +
+  'Official: https://www.doenets.lk/examresults'
+));
+
 bot.on('photo', (ctx) => { if(cacheMessage) cacheMessage(ctx); const cap=ctx.message.caption||''; if(cap.startsWith('/pro')||cap.startsWith('/siaapro')) return cmdPro(ctx); });
 bot.on('voice', (ctx) => { if(cacheMessage) cacheMessage(ctx); return cmdPro(ctx); });
-bot.on('text', (ctx) => { if(cacheMessage) cacheMessage(ctx); if(isSocialCommand && isSocialCommand(ctx)) return handleDlCommand(ctx); if(handleText) return handleText(ctx); });
+
+bot.on('text', async (ctx) => {
+  if (cacheMessage) cacheMessage(ctx);
+
+  // 1) Exam results session active නම් ඒකට priority දෙන්න
+  if (results?.hasSession && results.hasSession(ctx)) {
+    const handled = await results.resultsHandler(ctx).catch(e => {
+      console.error('results handler error:', e.message);
+      return ctx.reply('⚠️ Error: ' + e.message);
+    });
+    if (handled !== false) return;
+  }
+
+  // 2) Social downloader
+  if (isSocialCommand && isSocialCommand(ctx)) return handleDlCommand(ctx);
+
+  // 3) Downloader text flow (movie/tv search)
+  if (handleText) return handleText(ctx);
+});
+
 ['video','document','animation'].forEach(t=>{ bot.on(t,(ctx)=> cacheMessage && cacheMessage(ctx)); });
 
 bot.on('callback_query', (ctx) => {
